@@ -1,0 +1,15 @@
+version: "3.9"
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: actuate
+      POSTGRES_PASSWORD: actuate
+      POSTGRES_DB: actuate
+    ports:
+      - "5432:5432"
+    volumes:
+      - actuate_pg:/var/lib/postgresql/data
+
+volumes:
+  actuate_pg:
