@@ -1,15 +1,11 @@
-"""Embed Actuate's multi-agent graph in another Python app.
-
-One LiteLLM plant is shared across specialists. Actuate fans work out
-in parallel when the DAG allows.
-"""
+"""Embed Actuate's multi-agent graph in another Python app."""
 
 from __future__ import annotations
 
 import asyncio
 import os
 
-from actuate.graphs import GraphRunner, templates
+from actuate import Agents, Graph, GraphRunner
 from actuate.plants import LiteLLMAdapter
 
 
@@ -20,12 +16,19 @@ async def main() -> None:
         api_base=os.environ.get("ACTUATE_API_BASE") or None,
         temperature=0.2,
     )
-    graph = next(t for t in templates() if t["id"] == "public_health_ops")
+    graph = (
+        Graph("health-brief", target_score=0.8, max_passes=2)
+        .add("in", Agents.ingress)
+        .add("research", Agents.researcher)
+        .add("judge", Agents.judge_accuracy)
+        .add("out", Agents.egress)
+        .connect("in", "research", "judge", "out")
+    )
     result = await GraphRunner(plant, max_tokens=80_000).run(
         graph,
         prompt="Coastal town, three boil-water advisories. Cautious public brief. NEED SOURCE if unsure.",
     )
-    print(result["status"], result["tokens"], "tokens")
+    print(result["status"], result["reward"], result["tokens"], "tokens")
     print(result["output"][:800])
 
 

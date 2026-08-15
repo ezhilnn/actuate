@@ -183,11 +183,48 @@ _AGENTS: list[Agent] = [
 ]
 
 
+_CUSTOM: dict[str, Agent] = {}
+
+
+def register_agent(spec: dict[str, Any]) -> Agent:
+    """Add or replace a user-defined agent (id, kind, title, system, …)."""
+    ident = str(spec.get("id") or "").strip()
+    if not ident:
+        raise ValueError("agent spec needs an 'id'")
+    kind = str(spec.get("kind") or "agent")
+    if kind not in {"io", "agent", "judge"}:
+        raise ValueError("kind must be io, agent, or judge")
+    item: Agent = {
+        "id": ident,
+        "kind": kind,
+        "title": str(spec.get("title") or ident),
+        "color": str(spec.get("color") or "#3d8bfd"),
+        "blurb": str(spec.get("blurb") or "Custom agent"),
+        "system": str(spec.get("system") or ""),
+    }
+    _CUSTOM[ident] = item
+    return _enrich(item)
+
+
+def unregister_agent(agent_id: str) -> None:
+    _CUSTOM.pop(agent_id, None)
+
+
 def list_agents() -> list[Agent]:
-    return [_enrich(item) for item in _AGENTS]
+    seen: set[str] = set()
+    out: list[Agent] = []
+    for item in list(_CUSTOM.values()) + list(_AGENTS):
+        ident = str(item["id"])
+        if ident in seen:
+            continue
+        seen.add(ident)
+        out.append(_enrich(item))
+    return out
 
 
 def agent_by_id(agent_id: str) -> Agent:
+    if agent_id in _CUSTOM:
+        return _enrich(_CUSTOM[agent_id])
     for item in _AGENTS:
         if item["id"] == agent_id:
             return _enrich(item)
