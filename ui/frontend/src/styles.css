@@ -144,7 +144,26 @@ textarea { min-height: 280px; resize: vertical; }
 .badge { font-size: 11px; color: var(--green); }
 .badge.off { color: var(--red); }
 .rf { height: calc(100vh - 140px); background: #0b0e14; border: 1px solid var(--border); border-radius: 12px; }
-.log { font-size: 12px; color: var(--muted); max-height: 160px; overflow: auto; }
+.log { font-size: 12px; color: var(--muted); max-height: 220px; overflow: auto; white-space: pre-wrap; }
+.auth-gate {
+  min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; background: var(--bg);
+}
+.iter-rail-item {
+  display: flex; justify-content: space-between; width: 100%;
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; cursor: pointer; color: inherit;
+  transition: transform 180ms ease-out, border-color 180ms ease-out;
+}
+.iter-rail-item.on {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 1px var(--blue);
+}
+.iter-detail {
+  animation: drawer 200ms ease-out;
+}
+.iter-detail.open { view-transition-name: iter-card; }
+.diff { font-size: 12px; white-space: pre-wrap; max-height: 280px; overflow: auto; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
 .chip {
   font-size: 12px;
@@ -194,18 +213,63 @@ textarea { min-height: 280px; resize: vertical; }
 .tpl strong { display: block; font-size: 12px; }
 .tpl span { font-size: 11px; color: var(--muted); }
 .agent-node {
-  min-width: 150px;
+  min-width: 168px;
   background: #10131a;
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 8px 10px 10px;
+  position: relative;
 }
 .agent-node.sel { box-shadow: 0 0 0 1px var(--blue); }
-.agent-node.hot { border-color: var(--blue); }
-.agent-node.done { border-color: var(--green); }
+.agent-node-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
 .agent-node .k { display: block; font-size: 10px; color: var(--muted); text-transform: uppercase; }
 .agent-node strong { display: block; font-size: 13px; }
 .agent-node em { display: block; font-size: 11px; color: var(--muted); font-style: normal; }
+.run-pill {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 99px;
+  line-height: 1.3;
+}
+.run-pill.waiting, .run-pill.idle { color: #8b95a8; background: #1a1e28; border: 1px dashed #4a5263; }
+.run-pill.queued { color: #e2c56a; background: rgba(226, 197, 106, 0.12); }
+.run-pill.running { color: #7eb6ff; background: rgba(61, 139, 253, 0.16); }
+.run-pill.completed { color: #3dd68c; background: rgba(61, 214, 140, 0.14); }
+.run-pill.skipped { color: #9bb0c9; background: rgba(155, 176, 201, 0.12); }
+.run-pill.failed { color: #ff6b7a; background: rgba(255, 107, 122, 0.14); }
+.graph-run-canvas { position: relative; }
+.graph-legend {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  max-width: min(520px, calc(100% - 72px));
+  padding: 8px 10px;
+  background: rgba(16, 19, 26, 0.9);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  backdrop-filter: blur(8px);
+  font-size: 11px;
+  color: var(--muted);
+  pointer-events: none;
+}
+.graph-legend span { display: flex; align-items: center; gap: 6px; }
+.graph-legend i.lg {
+  width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex-shrink: 0;
+}
+.lg.waiting { border: 1px dashed #6a7384; background: #1a1e28; }
+.lg.queued { background: #c9b36a; }
+.lg.running { background: #3d8bfd; }
+.lg.completed { background: #3dd68c; }
+.lg.skipped { background: #8b9cb3; }
+.lg.failed { background: #ff6b7a; }
 .ghost {
   margin-top: 10px; width: 100%;
   background: transparent; border: 1px solid var(--border);
@@ -355,25 +419,74 @@ button:disabled { transform: none !important; opacity: 0.5; }
 
 .iter.open pre { animation: workspace-in 180ms ease-out; }
 
-.agent-node { transition: transform 160ms ease-out, box-shadow 160ms ease-out, border-color 160ms ease-out; }
+.agent-node { transition: transform 160ms ease-out, box-shadow 160ms ease-out, border-color 160ms ease-out, opacity 160ms ease-out; }
 .agent-node.sel { transform: scale(1.03); box-shadow: 0 0 0 1px var(--blue), 0 0 18px rgba(61, 139, 253, 0.35); }
-.agent-node.queued { animation: pulse-soft 1.1s ease-in-out 2; }
-.agent-node.running { box-shadow: 0 0 0 1px var(--blue); }
-.agent-node.completed { animation: confirm 280ms ease-out 1; }
-.agent-node.failed { animation: attention 320ms ease-out 1; }
-.agent-node.paused { animation: breathe 2.4s ease-in-out infinite; }
+.agent-node.ready { border-color: var(--node-accent, var(--border)); }
+.graph-run-canvas .agent-node.waiting, .graph-run-canvas .agent-node.idle {
+  opacity: 0.5;
+  border-style: dashed;
+  border-color: #3a4252;
+  filter: saturate(0.4);
+}
+.graph-run-canvas .agent-node.queued {
+  opacity: 0.82;
+  border-style: dashed;
+  border-color: #c9b36a;
+  animation: pulse-soft 1.1s ease-in-out 2;
+}
+.graph-run-canvas .agent-node.running {
+  border-color: #3d8bfd;
+  box-shadow: 0 0 0 1px rgba(61, 139, 253, 0.45);
+  overflow: hidden;
+}
+.graph-run-canvas .agent-node.running::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 5px;
+  height: 2px;
+  border-radius: 99px;
+  background: linear-gradient(90deg, transparent, #3d8bfd, transparent);
+  background-size: 200% 100%;
+  animation: node-bar 1.15s linear infinite;
+}
+@keyframes node-bar {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+.graph-run-canvas .agent-node.completed {
+  border-style: solid;
+  border-color: #2e6b50;
+  box-shadow: inset 3px 0 0 #3dd68c;
+  background: linear-gradient(180deg, #10191a 0%, #10131a 100%);
+  animation: confirm 280ms ease-out 1;
+}
+.graph-run-canvas .agent-node.skipped {
+  opacity: 0.88;
+  border-color: #4a5a6e;
+  background: repeating-linear-gradient(-45deg, #10131a, #10131a 6px, #141820 6px, #141820 12px);
+}
+.graph-run-canvas .agent-node.failed {
+  border-color: #ff6b7a;
+  box-shadow: inset 3px 0 0 #ff6b7a;
+  animation: attention 320ms ease-out 1;
+}
+.graph-run-canvas .agent-node.paused { animation: breathe 2.4s ease-in-out infinite; }
 
-.react-flow__edge.edge-flow .react-flow__edge-path {
-  stroke: #3d8bfd;
-  stroke-dasharray: 3 8;
-  animation: dash 700ms linear infinite;
+.graph-run-canvas .react-flow__edge-path {
+  stroke: #8b95a8 !important;
+  stroke-width: 1.6 !important;
 }
-.react-flow__edge.edge-live .react-flow__edge-path {
-  stroke: #3d8bfd;
-  filter: drop-shadow(0 0 4px rgba(61, 139, 253, 0.7));
-}
-@keyframes dash {
-  to { stroke-dashoffset: -22; }
+.graph-run-canvas .react-flow__edge.edge-run .react-flow__edge-path,
+.graph-run-canvas .react-flow__edge.edge-wait .react-flow__edge-path,
+.graph-run-canvas .react-flow__edge.edge-done .react-flow__edge-path,
+.graph-run-canvas .react-flow__edge.edge-flow .react-flow__edge-path,
+.graph-run-canvas .react-flow__edge.edge-live .react-flow__edge-path {
+  stroke: #8b95a8 !important;
+  stroke-width: 1.6 !important;
+  stroke-dasharray: 5 5;
+  opacity: 1;
 }
 .react-flow__minimap { background: #10131a !important; }
 

@@ -13,10 +13,14 @@ from actuate.runtime_loop import configure_windows_selector_loop
 
 configure_windows_selector_loop()
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from actuate.api.auth import auth_enabled, ensure_token, public_path, token_ok
 
 from actuate.domain.capability import CapabilityKinds
 from actuate.domain.control_system import ControlSystem, Workspace
@@ -44,7 +48,7 @@ from actuate.domain.templates import standard_closed_loop
 from actuate.engine.execution_engine import ExecutionEngine
 from actuate.engine.graph import topology_as_dict
 from actuate.graphs import GraphRunner, list_agents, templates as graph_templates
-from actuate.memory import InMemoryVectorStore, LearningGraph
+from actuate.memory import InMemoryVectorStore, LearningGraph, PostgresBackedVectors
 from actuate.persistence.in_memory_store import InMemoryRunStore
 from actuate.plants import PROVIDERS
 from actuate.plugins import register_builtins
@@ -147,6 +151,7 @@ class AppState:
         self.graphs: dict[str, dict[str, Any]] = {}
         self.graph_runs: dict[str, dict[str, Any]] = {}
         self.graph_logs: dict[str, list[dict[str, Any]]] = {}
+        self.console_token = ""
 
 
 STATE = AppState()
@@ -160,6 +165,10 @@ async def _init_store() -> None:
         store = SqlRunStore(url)
         await store.create_schema()
         STATE.store = store
+        backed = PostgresBackedVectors(store)
+        await backed.hydrate()
+        STATE.vectors = backed
+        STATE.memory = LearningGraph(backed)
     from actuate.persistence.bootstrap import seed_store
 
     STATE.workspace = await seed_store(STATE.store)
@@ -176,6 +185,9 @@ async def _init_store() -> None:
         for row in await STATE.store.list_graph_runs():
             if row.get("id"):
                 STATE.graph_runs[row["id"]] = row
+    STATE.console_token = await ensure_token(STATE.store)
+    if auth_enabled():
+        print(f"Actuate console auth is on. Token is stored in the keychain (provider=console_auth).")
 
 
 @asynccontextmanager
@@ -192,6 +204,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class ConsoleAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):  # type: ignore[no-untyped-def]
+        if not auth_enabled():
+            return await call_next(request)
+        path = request.url.path
+        if public_path(path):
+            return await call_next(request)
+        header = request.headers.get("authorization") or ""
+        token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+        token = token or request.query_params.get("token") or ""
+        if not token_ok(token, STATE.console_token):
+            return JSONResponse({"detail": "Unauthorized. Open Settings and paste the console token."}, status_code=401)
+        return await call_next(request)
+
+
+app.add_middleware(ConsoleAuthMiddleware)
 
 
 class NewControlSystem(BaseModel):
@@ -250,6 +280,8 @@ class GraphRunRequest(BaseModel):
     name: str = "Untitled graph"
     node_overrides: dict[str, str] = Field(default_factory=dict)
     parent_run_id: str | None = None
+    rerun_from: str | None = None
+    max_tokens: int = 250000
 
 
 class SavedGraph(BaseModel):
@@ -306,7 +338,7 @@ async def _load_run(run_id: str) -> Run:
 
 
 @app.get("/api/health")
-async def health() -> dict[str, Any]:
+async def health(request: Request) -> dict[str, Any]:
     backend = "postgres" if os.environ.get("DATABASE_URL") else "memory"
     keys = await STATE.store.get_keys()
     live = []
@@ -316,6 +348,7 @@ async def health() -> dict[str, Any]:
         env_key = item.get("env_key")
         if keys.get(item["id"]) or (env_key and os.environ.get(str(env_key))):
             live.append(item["id"])
+    local = bool(request.client and request.client.host in {"127.0.0.1", "::1", "testclient"})
     return {
         "status": "ok",
         "persistence": backend,
@@ -327,7 +360,22 @@ async def health() -> dict[str, Any]:
         "hint": None
         if live
         else "Save an NVIDIA / OpenAI / custom OpenAI-compatible key in Settings. Stub/mock plants are disabled.",
+        "auth_required": auth_enabled(),
+        "console_token": STATE.console_token if auth_enabled() and local else None,
     }
+
+
+class AuthLogin(BaseModel):
+    token: str = ""
+
+
+@app.post("/api/auth/login")
+async def auth_login(body: AuthLogin) -> dict[str, Any]:
+    if not auth_enabled():
+        return {"ok": True, "auth_required": False}
+    if not token_ok(body.token.strip(), STATE.console_token):
+        raise HTTPException(401, "Invalid console token")
+    return {"ok": True, "auth_required": True}
 
 
 @app.get("/api/models")
@@ -497,6 +545,8 @@ async def start_graph_run(body: GraphRunRequest) -> dict[str, str]:
         "model": body.model,
         "plant": "llm" if body.provider != "stub" else "stub",
         "parent_run_id": body.parent_run_id,
+        "rerun_from": body.rerun_from,
+        "max_tokens": body.max_tokens,
         "kind": "graph",
     }
     STATE.graph_logs[run_id] = []
@@ -508,14 +558,36 @@ async def start_graph_run(body: GraphRunRequest) -> dict[str, str]:
         STATE.graph_runs[run_id].setdefault("logs", []).append(payload)
         await STATE.hub.publish(run_id, payload)
 
+    async def _progress(traces: list[dict[str, Any]]) -> None:
+        STATE.graph_runs[run_id]["traces"] = traces
+        STATE.graph_runs[run_id]["tokens"] = sum(int(t.get("tokens") or 0) for t in traces)
+        STATE.graph_runs[run_id]["passes"] = max((int(t.get("passes") or 0) for t in traces), default=0)
+        if hasattr(STATE.store, "save_graph_run"):
+            await STATE.store.save_graph_run(STATE.graph_runs[run_id])
+
     async def _go() -> None:
         try:
-            result = await GraphRunner(generator, log=_log).run(
+            prior = None
+            if body.parent_run_id:
+                parent = STATE.graph_runs.get(body.parent_run_id)
+                if parent is None and hasattr(STATE.store, "load_graph_run"):
+                    parent = await STATE.store.load_graph_run(body.parent_run_id)
+                if parent:
+                    prior = {row["node_id"]: row for row in parent.get("traces") or [] if row.get("node_id")}
+            result = await GraphRunner(
+                generator,
+                log=_log,
+                memory=STATE.memory,
+                max_tokens=body.max_tokens,
+                on_progress=_progress,
+            ).run(
                 body.graph,
                 prompt=body.prompt,
                 run_id=run_id,
                 overrides=body.node_overrides,
                 context={"parent_run_id": body.parent_run_id},
+                prior_traces=prior,
+                rerun_from=body.rerun_from,
             )
             STATE.graph_runs[run_id].update(result)
             STATE.graph_runs[run_id]["name"] = display
@@ -523,11 +595,17 @@ async def start_graph_run(body: GraphRunRequest) -> dict[str, str]:
             STATE.graph_runs[run_id]["provider"] = body.provider
             STATE.graph_runs[run_id]["model"] = body.model
             STATE.graph_runs[run_id]["kind"] = "graph"
+            STATE.graph_runs[run_id]["max_tokens"] = body.max_tokens
+            if result.get("status") == "converged" and result.get("output"):
+                await STATE.memory.record_success(
+                    prompt=body.prompt, revision=str(result["output"]), score=float(result.get("target_score") or 0)
+                )
             if hasattr(STATE.store, "save_graph_run"):
                 await STATE.store.save_graph_run(STATE.graph_runs[run_id])
         except Exception as exc:  # noqa: BLE001
             STATE.graph_runs[run_id]["status"] = "failed"
             STATE.graph_runs[run_id]["output"] = str(exc)
+            STATE.graph_runs[run_id]["stop_reason"] = str(exc)
             if hasattr(STATE.store, "save_graph_run"):
                 await STATE.store.save_graph_run(STATE.graph_runs[run_id])
             await _log({"kind": "GraphFailed", "run_id": run_id, "error": str(exc)})
@@ -562,14 +640,181 @@ async def list_graph_runs() -> dict[str, Any]:
     return {"runs": list(reversed(list(rows)))}
 
 
+def _hydrate_graph_run(row: dict[str, Any]) -> dict[str, Any]:
+    """Fill traces from persisted node logs so historic runs still inspect."""
+    traces: dict[str, dict[str, Any]] = {}
+    for item in row.get("traces") or []:
+        nid = item.get("node_id")
+        if nid:
+            traces[nid] = dict(item)
+            traces[nid].setdefault("inputs", [])
+            traces[nid].setdefault("outputs", [])
+            traces[nid].setdefault("scores", [])
+            traces[nid].setdefault("feedback", [])
+            traces[nid].setdefault("steps", [])
+    for ev in row.get("logs") or []:
+        nid = ev.get("node_id")
+        if not nid:
+            continue
+        slot = traces.setdefault(
+            nid,
+            {
+                "node_id": nid,
+                "agent": ev.get("agent") or "",
+                "title": ev.get("title") or "",
+                "inputs": [],
+                "outputs": [],
+                "scores": [],
+                "feedback": [],
+                "latency_seconds": float(ev.get("latency_seconds") or 0),
+                "tokens": int(ev.get("tokens") or 0),
+                "passes": int(ev.get("pass") or 0),
+                "steps": [],
+            },
+        )
+        if ev.get("agent") and not slot.get("agent"):
+            slot["agent"] = ev["agent"]
+        kind = ev.get("kind")
+        if kind == "NodeStarted" and ev.get("input") and not slot["inputs"]:
+            slot["inputs"] = [ev["input"]]
+        if kind == "NodeCompleted":
+            if ev.get("input"):
+                slot["inputs"] = slot["inputs"] or [ev["input"]]
+            if ev.get("output") and not slot["outputs"]:
+                slot["outputs"] = [ev["output"]]
+            if ev.get("tokens") is not None:
+                slot["tokens"] = max(int(slot.get("tokens") or 0), int(ev.get("tokens") or 0))
+            if ev.get("latency_seconds") is not None:
+                slot["latency_seconds"] = max(
+                    float(slot.get("latency_seconds") or 0), float(ev.get("latency_seconds") or 0)
+                )
+            if ev.get("pass") is not None:
+                slot["passes"] = max(int(slot.get("passes") or 0), int(ev.get("pass") or 0))
+        if kind == "NodeSkipped":
+            slot["frozen"] = True
+    row["traces"] = list(traces.values())
+    row.setdefault("logs", [])
+    return row
+
+
 @app.get("/api/graph-runs/{run_id}")
 async def get_graph_run(run_id: str) -> dict[str, Any]:
     if run_id in STATE.graph_runs:
-        return STATE.graph_runs[run_id]
+        return _hydrate_graph_run(dict(STATE.graph_runs[run_id]))
     loaded = await STATE.store.load_graph_run(run_id) if hasattr(STATE.store, "load_graph_run") else None
     if not loaded:
         raise HTTPException(404, "unknown graph run")
-    return loaded
+    return _hydrate_graph_run(dict(loaded))
+
+
+def _diff_text(left: str, right: str) -> list[dict[str, str]]:
+    import difflib
+
+    rows = []
+    for line in difflib.unified_diff(
+        (left or "").splitlines(), (right or "").splitlines(), lineterm="", n=2
+    ):
+        if line.startswith("+++") or line.startswith("---") or line.startswith("@@"):
+            continue
+        rows.append({"op": line[:1], "text": line[1:]})
+    return rows[:400]
+
+
+async def _any_run(run_id: str) -> dict[str, Any]:
+    if run_id in STATE.graph_runs:
+        row = _hydrate_graph_run(dict(STATE.graph_runs[run_id]))
+        row["kind"] = "graph"
+        return row
+    if hasattr(STATE.store, "load_graph_run"):
+        loaded = await STATE.store.load_graph_run(run_id)
+        if loaded:
+            loaded = _hydrate_graph_run(dict(loaded))
+            loaded["kind"] = "graph"
+            return loaded
+    try:
+        run = await _load_run(run_id)
+        detail = await get_run(run_id)
+        detail["kind"] = "loop"
+        detail["output"] = ""
+        iters = detail.get("iterations") or []
+        if iters:
+            detail["output"] = iters[-1].get("output") or ""
+            detail["prompt"] = iters[0].get("prompt") or detail.get("metadata", {}).get("prompt")
+        return detail
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(404, f"unknown run {run_id}") from exc
+
+
+@app.get("/api/graph-runs/{run_id}/pack")
+async def export_graph_pack(run_id: str) -> dict[str, Any]:
+    row = await _any_run(run_id)
+    return {
+        "kind": row.get("kind"),
+        "id": row.get("id"),
+        "name": row.get("name") or row.get("graph_name"),
+        "status": row.get("status"),
+        "prompt": row.get("prompt"),
+        "output": row.get("output"),
+        "tokens": row.get("tokens"),
+        "latency_seconds": row.get("latency_seconds"),
+        "passes": row.get("passes"),
+        "target_score": row.get("target_score"),
+        "graph": row.get("graph"),
+        "traces": row.get("traces") or [],
+        "logs": row.get("logs") or [],
+        "iterations": row.get("iterations") or [],
+        "provider": row.get("provider"),
+        "model": row.get("model"),
+        "parent_run_id": row.get("parent_run_id"),
+        "rerun_from": row.get("rerun_from"),
+    }
+
+
+@app.get("/api/runs/{run_id}/pack")
+async def export_loop_pack(run_id: str) -> dict[str, Any]:
+    return await export_graph_pack(run_id)
+
+
+@app.get("/api/compare")
+async def compare_runs(a: str, b: str) -> dict[str, Any]:
+    left = await _any_run(a)
+    right = await _any_run(b)
+    return {
+        "a": {
+            "id": left.get("id"),
+            "name": left.get("name") or left.get("graph_name"),
+            "kind": left.get("kind"),
+            "status": left.get("status"),
+            "tokens": left.get("tokens"),
+            "latency_seconds": left.get("latency_seconds"),
+            "best_score": left.get("best_score"),
+            "passes": left.get("passes") or left.get("iterations") and len(left.get("iterations") or []),
+        },
+        "b": {
+            "id": right.get("id"),
+            "name": right.get("name") or right.get("graph_name"),
+            "kind": right.get("kind"),
+            "status": right.get("status"),
+            "tokens": right.get("tokens"),
+            "latency_seconds": right.get("latency_seconds"),
+            "best_score": right.get("best_score"),
+            "passes": right.get("passes") or right.get("iterations") and len(right.get("iterations") or []),
+        },
+        "delta": {
+            "tokens": int(right.get("tokens") or 0) - int(left.get("tokens") or 0),
+            "latency_seconds": float(right.get("latency_seconds") or 0) - float(left.get("latency_seconds") or 0),
+            "score": (
+                None
+                if left.get("best_score") is None or right.get("best_score") is None
+                else float(right["best_score"]) - float(left["best_score"])
+            ),
+        },
+        "output_diff": _diff_text(str(left.get("output") or ""), str(right.get("output") or "")),
+        "output_a": left.get("output"),
+        "output_b": right.get("output"),
+    }
 
 
 @app.get("/api/activity")
@@ -852,20 +1097,33 @@ async def put_key(body: KeyPayload) -> dict[str, str]:
 
 @app.websocket("/ws/runs/{run_id}")
 async def ws_run(websocket: WebSocket, run_id: str) -> None:
+    if auth_enabled():
+        token = websocket.query_params.get("token") or ""
+        header = websocket.headers.get("authorization") or ""
+        if header.lower().startswith("bearer "):
+            token = token or header[7:].strip()
+        if not token_ok(token, STATE.console_token):
+            await websocket.close(code=4401)
+            return
     await websocket.accept()
     await STATE.hub.join(run_id, websocket)
     try:
-        run = await _load_run(run_id)
-        for event in run.events:
-            await websocket.send_json(
-                {
-                    "id": event.id,
-                    "run_id": event.run_id,
-                    "at": event.at,
-                    "kind": type(event).__name__,
-                    "data": _event_view(event),
-                }
-            )
+        for payload in STATE.graph_logs.get(run_id, []):
+            await websocket.send_json(payload)
+        try:
+            run = await _load_run(run_id)
+            for event in run.events:
+                await websocket.send_json(
+                    {
+                        "id": event.id,
+                        "run_id": event.run_id,
+                        "at": event.at,
+                        "kind": type(event).__name__,
+                        "data": _event_view(event),
+                    }
+                )
+        except Exception:  # noqa: BLE001
+            pass
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:

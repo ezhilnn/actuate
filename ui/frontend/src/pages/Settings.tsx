@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
-import { api } from "../api";
+import { api, getToken, setToken } from "../api";
 
 export default function Settings() {
   const [provider, setProvider] = useState("nvidia");
@@ -8,6 +8,7 @@ export default function Settings() {
   const [msg, setMsg] = useState("");
   const [configured, setConfigured] = useState<Record<string, boolean>>({});
   const [health, setHealth] = useState<{ llm_connected: boolean; hint?: string | null } | null>(null);
+  const [consoleTok, setConsoleTok] = useState(getToken());
 
   async function refresh() {
     const [keys, h] = await Promise.all([
@@ -52,6 +53,21 @@ export default function Settings() {
           <span className={`chip ${ok ? "ok" : ""}`} key={id}>{id}{ok ? "" : " — empty"}</span>
         ))}
       </div>
+      <form
+        className="card"
+        style={{ maxWidth: 520, marginBottom: 16 }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          setToken(consoleTok);
+          setMsg("Console token saved in this browser.");
+        }}
+      >
+        <h3>API auth</h3>
+        <p className="sub">Required when ACTUATE_AUTH is on. Localhost receives the token from health automatically.</p>
+        <label>Console token</label>
+        <input value={consoleTok} onChange={(e) => setConsoleTok(e.target.value)} autoComplete="off" />
+        <button className="primary btn-press" type="submit">Save token</button>
+      </form>
       <form className="card" onSubmit={onSubmit} style={{ maxWidth: 520 }}>
         <label>Provider</label>
         <select

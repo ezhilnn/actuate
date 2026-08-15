@@ -7,6 +7,7 @@ not a second orchestration engine.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from typing import Any
@@ -15,11 +16,15 @@ from actuate.domain.signals import MemoryRecord
 
 
 def _embed(text: str) -> list[float]:
-    """Tiny hashed bag-of-words embedding so memory works without extra deps."""
+    """Tiny hashed bag-of-words embedding so memory works without extra deps.
+
+    MD5 (not `hash()`) so embeddings stay stable across process restarts / Postgres.
+    """
 
     vector = [0.0] * 64
     for token in re.findall(r"[a-z0-9]+", text.lower()):
-        vector[hash(token) % 64] += 1.0
+        digest = hashlib.md5(token.encode("utf-8")).digest()
+        vector[int.from_bytes(digest[:2], "big") % 64] += 1.0
     norm = math.sqrt(sum(v * v for v in vector)) or 1.0
     return [v / norm for v in vector]
 
@@ -70,3 +75,33 @@ class LearningGraph:
     async def recall(self, query: str, *, top_k: int = 5) -> list[MemoryRecord]:
         retriever = CosineMemoryRetriever(self.store)
         return await retriever.recall(query, top_k=top_k)
+
+
+class PostgresBackedVectors:
+    """In-process cosine index with a Postgres write-through so recall survives restarts."""
+
+    def __init__(self, sql: Any) -> None:
+        self.sql = sql
+        self._mem = InMemoryVectorStore()
+
+    async def hydrate(self) -> None:
+        if not hasattr(self.sql, "list_memory"):
+            return
+        for record, embedding in await self.sql.list_memory():
+            await self._mem.put(record, embedding=embedding)
+
+    async def put(self, record: MemoryRecord, *, embedding: list[float]) -> None:
+        await self.sql.save_memory(
+            text=record.text,
+            score=record.score,
+            kind=record.kind,
+            metadata=dict(record.metadata or {}),
+            embedding=embedding,
+        )
+        await self._mem.put(record, embedding=embedding)
+
+    async def count(self) -> int:
+        return await self._mem.count()
+
+    def rows(self) -> list[tuple[MemoryRecord, list[float]]]:
+        return self._mem.rows()

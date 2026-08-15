@@ -7,13 +7,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Float, String, Text, select
+from sqlalchemy import Float, Integer, String, Text, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm.attributes import flag_modified
 
 from actuate.domain.control_system import ControlSystem, Workspace
 from actuate.domain.events import Event
+from actuate.domain.signals import MemoryRecord
 from actuate.domain.specification import Specification
 from actuate.persistence.codec import decode_event, decode_specification, encode, encode_specification
 
@@ -72,6 +74,18 @@ class GraphRunRow(Base):
     name: Mapped[str] = mapped_column(String(256), default="")
     status: Mapped[str] = mapped_column(String(32), default="running")
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[float] = mapped_column(Float)
+
+
+class MemoryRow(Base):
+    __tablename__ = "memory_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    text: Mapped[str] = mapped_column(Text)
+    score: Mapped[float] = mapped_column(Float)
+    kind: Mapped[str] = mapped_column(String(64), default="success")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    embedding: Mapped[list[Any]] = mapped_column(JSONB)
     created_at: Mapped[float] = mapped_column(Float)
 
 
@@ -217,14 +231,15 @@ class SqlRunStore:
                         id=run["id"],
                         name=str(run.get("name") or run.get("graph_name") or ""),
                         status=str(run.get("status") or "running"),
-                        payload=run,
+                        payload=dict(run),
                         created_at=time.time(),
                     )
                 )
             else:
-                existing.payload = run
+                existing.payload = dict(run)
                 existing.status = str(run.get("status") or existing.status)
                 existing.name = str(run.get("name") or existing.name)
+                flag_modified(existing, "payload")
             await session.commit()
 
     async def load_graph_run(self, run_id: str) -> dict[str, Any] | None:
@@ -236,3 +251,44 @@ class SqlRunStore:
         async with self._session() as session:
             rows = (await session.execute(select(GraphRunRow).order_by(GraphRunRow.created_at.desc()))).scalars().all()
         return [dict(row.payload) for row in rows]
+
+    async def save_memory(
+        self,
+        *,
+        text: str,
+        score: float,
+        kind: str,
+        metadata: dict[str, Any],
+        embedding: list[float],
+    ) -> None:
+        import time
+
+        async with self._session() as session:
+            session.add(
+                MemoryRow(
+                    text=text,
+                    score=score,
+                    kind=kind,
+                    metadata_json=metadata or {},
+                    embedding=list(embedding),
+                    created_at=time.time(),
+                )
+            )
+            await session.commit()
+
+    async def list_memory(self) -> list[tuple[MemoryRecord, list[float]]]:
+        async with self._session() as session:
+            rows = (await session.execute(select(MemoryRow).order_by(MemoryRow.id))).scalars().all()
+        out: list[tuple[MemoryRecord, list[float]]] = []
+        for row in rows:
+            rec = MemoryRecord(
+                text=row.text,
+                score=row.score,
+                kind=row.kind,
+                metadata=dict(row.metadata_json or {}),
+            )
+            emb = [float(x) for x in (row.embedding or [])]
+            if len(emb) != 64:
+                continue
+            out.append((rec, emb))
+        return out

@@ -30,6 +30,14 @@ function stats(nums: number[]) {
 export default function Benchmarks() {
   const [rows, setRows] = useState<Row[]>([]);
   const [kind, setKind] = useState("all");
+  const [left, setLeft] = useState("");
+  const [right, setRight] = useState("");
+  const [cmp, setCmp] = useState<null | {
+    a: { name?: string; tokens?: number; latency_seconds?: number; best_score?: number | null; status?: string };
+    b: { name?: string; tokens?: number; latency_seconds?: number; best_score?: number | null; status?: string };
+    delta: { tokens: number; latency_seconds: number; score: number | null };
+    output_diff: { op: string; text: string }[];
+  }>(null);
   useEffect(() => {
     api<{ runs: Row[] }>("/api/activity").then((d) => setRows(d.runs)).catch(console.error);
   }, []);
@@ -74,6 +82,60 @@ export default function Benchmarks() {
           </button>
         ))}
         <span className="chip">{filtered.length} runs</span>
+      </div>
+      <div className="card" style={{ marginBottom: 12 }}>
+        <h3>Compare two named runs</h3>
+        <div className="grid2">
+          <div>
+            <label>Run A</label>
+            <select value={left} onChange={(e) => setLeft(e.target.value)}>
+              <option value="">—</option>
+              {rows.map((r) => (
+                <option key={r.id} value={r.id}>{r.name || r.graph_name || r.id} ({r.kind})</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label>Run B</label>
+            <select value={right} onChange={(e) => setRight(e.target.value)}>
+              <option value="">—</option>
+              {rows.map((r) => (
+                <option key={r.id} value={r.id}>{r.name || r.graph_name || r.id} ({r.kind})</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <button
+          type="button"
+          className="primary btn-press"
+          disabled={!left || !right}
+          onClick={async () => {
+            const data = await api<NonNullable<typeof cmp>>(`/api/compare?a=${left}&b=${right}`);
+            setCmp(data);
+          }}
+        >
+          Compare
+        </button>
+        {cmp && (
+          <div className="grid3" style={{ marginTop: 12 }}>
+            <div>
+              <p className="sub">{cmp.a.name}</p>
+              <p>{cmp.a.status} · {cmp.a.tokens} tok · {(cmp.a.latency_seconds || 0).toFixed(2)}s · score {cmp.a.best_score ?? "—"}</p>
+            </div>
+            <div>
+              <p className="sub">Delta (B − A)</p>
+              <p>tokens {cmp.delta.tokens} · latency {cmp.delta.latency_seconds.toFixed(2)}s · score {cmp.delta.score ?? "—"}</p>
+            </div>
+            <div>
+              <p className="sub">{cmp.b.name}</p>
+              <p>{cmp.b.status} · {cmp.b.tokens} tok · {(cmp.b.latency_seconds || 0).toFixed(2)}s · score {cmp.b.best_score ?? "—"}</p>
+            </div>
+            <div className="card" style={{ gridColumn: "1 / -1" }}>
+              <h3>Output diff</h3>
+              <pre className="diff">{cmp.output_diff.map((d) => `${d.op}${d.text}`).join("\n") || "(identical or empty)"}</pre>
+            </div>
+          </div>
+        )}
       </div>
       <div className="kpis dense">
         <Kpi title="Runs" value={filtered.length} hint={`${graphs.length} graphs · ${loops.length} loops`} />
