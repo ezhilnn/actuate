@@ -65,6 +65,16 @@ class KeyRow(Base):
     api_key: Mapped[str] = mapped_column(Text)
 
 
+class GraphRunRow(Base):
+    __tablename__ = "graph_runs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(256), default="")
+    status: Mapped[str] = mapped_column(String(32), default="running")
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[float] = mapped_column(Float)
+
+
 class SqlRunStore:
     def __init__(self, url: str) -> None:
         self.engine: AsyncEngine = create_async_engine(url, pool_pre_ping=True)
@@ -195,3 +205,34 @@ class SqlRunStore:
         async with self._session() as session:
             rows = (await session.execute(select(KeyRow))).scalars().all()
         return {row.provider: row.api_key for row in rows}
+
+    async def save_graph_run(self, run: dict[str, Any]) -> None:
+        import time
+
+        async with self._session() as session:
+            existing = await session.get(GraphRunRow, run["id"])
+            if existing is None:
+                session.add(
+                    GraphRunRow(
+                        id=run["id"],
+                        name=str(run.get("name") or run.get("graph_name") or ""),
+                        status=str(run.get("status") or "running"),
+                        payload=run,
+                        created_at=time.time(),
+                    )
+                )
+            else:
+                existing.payload = run
+                existing.status = str(run.get("status") or existing.status)
+                existing.name = str(run.get("name") or existing.name)
+            await session.commit()
+
+    async def load_graph_run(self, run_id: str) -> dict[str, Any] | None:
+        async with self._session() as session:
+            row = await session.get(GraphRunRow, run_id)
+        return dict(row.payload) if row is not None else None
+
+    async def list_graph_runs(self) -> list[dict[str, Any]]:
+        async with self._session() as session:
+            rows = (await session.execute(select(GraphRunRow).order_by(GraphRunRow.created_at.desc()))).scalars().all()
+        return [dict(row.payload) for row in rows]

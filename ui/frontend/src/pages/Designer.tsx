@@ -16,16 +16,9 @@ import ReactFlow, {
 import "reactflow/dist/style.css";
 import { api, Provider } from "../api";
 import AgentFlowNode from "../graph/AgentFlowNode";
+import AgentGuide, { Agent } from "../graph/AgentGuide";
 
 const nodeTypes = { agent: AgentFlowNode };
-
-type Agent = {
-  id: string;
-  kind: string;
-  title: string;
-  color: string;
-  blurb: string;
-};
 
 type Template = {
   id: string;
@@ -99,6 +92,8 @@ function DesignerInner() {
   const [filter, setFilter] = useState("");
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
+  const [guideId, setGuideId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [q, setQ] = useState("");
@@ -126,7 +121,7 @@ function DesignerInner() {
         setTarget(starter.target_score);
         setPasses(starter.max_passes);
       }
-    });
+    }).finally(() => setLoading(false));
   }, [setEdges, setNodes]);
 
   const onConnect = useCallback(
@@ -163,6 +158,7 @@ function DesignerInner() {
             kind: spec.kind,
             color: spec.color,
             blurb: spec.blurb,
+            system: spec.system,
           },
         },
       ]);
@@ -171,6 +167,9 @@ function DesignerInner() {
   );
 
   const selectedNode = nodes.find((n) => n.id === selected);
+  const guideAgent =
+    agents.find((a) => a.id === guideId) ||
+    agents.find((a) => a.id === selectedNode?.data.agent);
 
   const start = async () => {
     setError("");
@@ -178,7 +177,7 @@ function DesignerInner() {
       const graph = fromFlow(nodes, edges, name, target, passes);
       const created = await api<{ run_id: string }>("/api/graphs/run", {
         method: "POST",
-        body: JSON.stringify({ prompt, graph, provider, model }),
+        body: JSON.stringify({ prompt, name, graph, provider, model }),
       });
       nav(`/graph/${created.run_id}`);
     } catch (err) {
@@ -218,16 +217,22 @@ function DesignerInner() {
         <aside className="palette">
           <h3>Agents</h3>
           <input placeholder="Search agents" value={q} onChange={(e) => setQ(e.target.value)} />
+          {loading && (
+            <div className="boot">
+              <div className="boot-orb" />
+              <p>Loading agents and templates…</p>
+            </div>
+          )}
           {(["io", "judge", "agent"] as const).map((kind) => (
             <div key={kind}>
               <p className="palette-k">{kind}</p>
               {(grouped[kind] || []).map((a) => (
                 <div
                   key={a.id}
-                  className="palette-item"
+                  className={`palette-item ${guideId === a.id ? "on" : ""}`}
                   draggable
+                  onClick={() => setGuideId(a.id)}
                   onDragStart={(e) => e.dataTransfer.setData("application/actuate-agent", JSON.stringify(a))}
-                  title={a.blurb}
                 >
                   <i style={{ background: a.color }} />
                   {a.title}
@@ -248,7 +253,10 @@ function DesignerInner() {
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             nodeTypes={nodeTypes}
-            onNodeClick={(_, n) => setSelected(n.id)}
+            onNodeClick={(_, n) => {
+              setSelected(n.id);
+              setGuideId(n.data.agent);
+            }}
             onPaneClick={() => setSelected(null)}
             fitView
             deleteKeyCode={["Backspace", "Delete"]}
@@ -259,6 +267,7 @@ function DesignerInner() {
           </ReactFlow>
         </div>
         <aside className="inspector">
+          <AgentGuide agent={guideAgent} />
           <h3>Templates</h3>
           <input placeholder="Filter templates" value={filter} onChange={(e) => setFilter(e.target.value)} />
           <div className="tpl-list">
@@ -290,8 +299,8 @@ function DesignerInner() {
           <input type="number" min={1} max={12} value={passes} onChange={(e) => setPasses(Number(e.target.value))} />
           {selectedNode && (
             <>
-              <h3>Selected node</h3>
-              <p className="sub">{selectedNode.data.blurb}</p>
+              <h3>This node on the canvas</h3>
+              <p className="sub">Change the specialist or remove the node. Wiring stays until you delete edges.</p>
               <label>Agent type</label>
               <select
                 value={selectedNode.data.agent}

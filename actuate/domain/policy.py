@@ -29,6 +29,7 @@ class StabilityGuard(BaseModel):
     """Safety bounds, independent of any one control algorithm."""
 
     max_iterations: int = Field(default=8, ge=1)
+    min_iterations: int = Field(default=1, ge=1)
     timeout_seconds: float | None = Field(default=120.0, ge=0.0)
 
 

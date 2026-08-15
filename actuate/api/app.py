@@ -171,6 +171,10 @@ async def _init_store() -> None:
             os.environ[env_name] = key
             if provider == "nvidia":
                 os.environ["NVIDIA_NIM_API_KEY"] = key
+    if hasattr(STATE.store, "list_graph_runs"):
+        for row in await STATE.store.list_graph_runs():
+            if row.get("id"):
+                STATE.graph_runs[row["id"]] = row
 
 
 @asynccontextmanager
@@ -208,6 +212,8 @@ class NewRunRequest(BaseModel):
     controller: str = "rule"
     required_phrases: list[str] = Field(default_factory=list)
     min_length: int = 80
+    min_iterations: int = 3
+    name: str = "Untitled loop"
     control_system_id: str | None = None
     control_system_name: str = "adhoc"
     api_base: str | None = None
@@ -240,6 +246,9 @@ class GraphRunRequest(BaseModel):
     api_base: str | None = None
     api_key: str | None = None
     allow_stub: bool = False
+    name: str = "Untitled graph"
+    node_overrides: dict[str, str] = Field(default_factory=dict)
+    parent_run_id: str | None = None
 
 
 class SavedGraph(BaseModel):
@@ -262,6 +271,8 @@ def _run_summary(run: Run) -> dict[str, Any]:
         "latency_seconds": summary.total_latency_seconds,
         "tokens": summary.total_tokens,
         "best_score": summary.best_score,
+        "kind": "loop",
+        "name": None,
     }
 
 
@@ -469,9 +480,12 @@ async def start_graph_run(body: GraphRunRequest) -> dict[str, str]:
     )
     generator = _generator(plant_name, plant_params)
     run_id = uuid.uuid4().hex
+    display = body.name or body.graph.get("name") or "Untitled graph"
+    body.graph = {**body.graph, "name": display}
     STATE.graph_runs[run_id] = {
         "id": run_id,
         "status": "running",
+        "name": display,
         "prompt": body.prompt,
         "graph": body.graph,
         "traces": [],
@@ -480,8 +494,12 @@ async def start_graph_run(body: GraphRunRequest) -> dict[str, str]:
         "provider": body.provider,
         "model": body.model,
         "plant": "llm" if body.provider != "stub" else "stub",
+        "parent_run_id": body.parent_run_id,
+        "kind": "graph",
     }
     STATE.graph_logs[run_id] = []
+    if hasattr(STATE.store, "save_graph_run"):
+        await STATE.store.save_graph_run(STATE.graph_runs[run_id])
 
     async def _log(payload: dict[str, Any]) -> None:
         STATE.graph_logs[run_id].append(payload)
@@ -490,14 +508,26 @@ async def start_graph_run(body: GraphRunRequest) -> dict[str, str]:
 
     async def _go() -> None:
         try:
-            result = await GraphRunner(generator, log=_log).run(body.graph, prompt=body.prompt, run_id=run_id)
+            result = await GraphRunner(generator, log=_log).run(
+                body.graph,
+                prompt=body.prompt,
+                run_id=run_id,
+                overrides=body.node_overrides,
+                context={"parent_run_id": body.parent_run_id},
+            )
             STATE.graph_runs[run_id].update(result)
+            STATE.graph_runs[run_id]["name"] = display
             STATE.graph_runs[run_id]["plant"] = "llm" if body.provider != "stub" else "stub"
             STATE.graph_runs[run_id]["provider"] = body.provider
             STATE.graph_runs[run_id]["model"] = body.model
+            STATE.graph_runs[run_id]["kind"] = "graph"
+            if hasattr(STATE.store, "save_graph_run"):
+                await STATE.store.save_graph_run(STATE.graph_runs[run_id])
         except Exception as exc:  # noqa: BLE001
             STATE.graph_runs[run_id]["status"] = "failed"
             STATE.graph_runs[run_id]["output"] = str(exc)
+            if hasattr(STATE.store, "save_graph_run"):
+                await STATE.store.save_graph_run(STATE.graph_runs[run_id])
             await _log({"kind": "GraphFailed", "run_id": run_id, "error": str(exc)})
 
     STATE.running[run_id] = asyncio.create_task(_go())
@@ -506,26 +536,60 @@ async def start_graph_run(body: GraphRunRequest) -> dict[str, str]:
 
 @app.get("/api/graph-runs")
 async def list_graph_runs() -> dict[str, Any]:
+    stored = await STATE.store.list_graph_runs() if hasattr(STATE.store, "list_graph_runs") else []
+    by_id = {row.get("id"): row for row in stored if row.get("id")}
+    by_id.update(STATE.graph_runs)
     rows = []
-    for item in STATE.graph_runs.values():
+    for item in by_id.values():
         rows.append(
             {
                 "id": item.get("id"),
+                "kind": "graph",
+                "name": item.get("name") or item.get("graph_name") or "Graph run",
                 "status": item.get("status"),
                 "graph_name": item.get("graph_name") or (item.get("graph") or {}).get("name"),
                 "tokens": item.get("tokens", 0),
                 "latency_seconds": item.get("latency_seconds", 0),
                 "passes": item.get("passes", 0),
+                "prompt": (item.get("prompt") or "")[:240],
             }
         )
-    return {"runs": list(reversed(rows))}
+    return {"runs": list(reversed(list(rows)))}
 
 
 @app.get("/api/graph-runs/{run_id}")
 async def get_graph_run(run_id: str) -> dict[str, Any]:
-    if run_id not in STATE.graph_runs:
+    if run_id in STATE.graph_runs:
+        return STATE.graph_runs[run_id]
+    loaded = await STATE.store.load_graph_run(run_id) if hasattr(STATE.store, "load_graph_run") else None
+    if not loaded:
         raise HTTPException(404, "unknown graph run")
-    return STATE.graph_runs[run_id]
+    return loaded
+
+
+@app.get("/api/activity")
+async def activity() -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for run_id in await STATE.store.list_run_ids():
+        run = await _load_run(run_id)
+        row = _run_summary(run)
+        name = "Loop run"
+        prompt = ""
+        try:
+            spec = await STATE.store.load_specification(run.specification_id)
+            name = spec.metadata.get("name") or name
+            prompt = spec.metadata.get("prompt") or ""
+            row["provider"] = spec.metadata.get("provider")
+            row["model"] = spec.metadata.get("model")
+        except Exception:  # noqa: BLE001
+            pass
+        row.update({"kind": "loop", "name": name, "prompt": prompt[:240], "href": f"/live/{run_id}"})
+        items.append(row)
+    graphs = (await list_graph_runs())["runs"]
+    for g in graphs:
+        items.append({**g, "href": f"/graph/{g['id']}", "iterations": g.get("passes") or 0, "best_score": None})
+    items.sort(key=lambda r: r.get("started_at") or 0, reverse=True)
+    return {"runs": items}
 
 
 @app.post("/api/runs")
@@ -575,7 +639,7 @@ async def start_run(body: NewRunRequest) -> dict[str, str]:
         policies=LoopPolicy(
             set_point=SetPoint(target=body.target_score),
             convergence=ConvergenceCriteria(),
-            stability=StabilityGuard(max_iterations=body.max_iterations),
+            stability=StabilityGuard(max_iterations=body.max_iterations, min_iterations=body.min_iterations),
             actuation=ActuationPolicy(gain=body.gain, retry_strategy=retry),
         ),
         metadata={
@@ -584,6 +648,8 @@ async def start_run(body: NewRunRequest) -> dict[str, str]:
             "provider": body.provider,
             "plant": "llm" if body.provider != "stub" else "stub",
             "api_base": api_base or "",
+            "name": body.name,
+            "kind": "loop",
         },
     )
     await STATE.store.save_specification(spec)

@@ -21,6 +21,7 @@ class InMemoryRunStore:
         self._workspaces: dict[str, Workspace] = {}
         self._control_systems: dict[str, ControlSystem] = {}
         self._keys: dict[str, str] = {}
+        self._graph_runs: dict[str, dict] = {}
 
     async def append_event(self, event: Event) -> None:
         self._events.setdefault(event.run_id, EventLog()).append(event)
@@ -63,3 +64,13 @@ class InMemoryRunStore:
 
     async def get_keys(self) -> dict[str, str]:
         return dict(self._keys)
+
+    async def save_graph_run(self, run: dict) -> None:
+        self._graph_runs[run["id"]] = run
+
+    async def load_graph_run(self, run_id: str) -> dict | None:
+        row = self._graph_runs.get(run_id)
+        return dict(row) if row else None
+
+    async def list_graph_runs(self) -> list[dict]:
+        return list(reversed(list(self._graph_runs.values())))
