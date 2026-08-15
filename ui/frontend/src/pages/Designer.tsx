@@ -87,6 +87,7 @@ function DesignerInner() {
   );
   const [target, setTarget] = useState(0.85);
   const [passes, setPasses] = useState(4);
+  const [maxTokens, setMaxTokens] = useState(250000);
   const [name, setName] = useState("Accurate explainer");
   const [filter, setFilter] = useState("");
   const [error, setError] = useState("");
@@ -182,7 +183,7 @@ function DesignerInner() {
       const graph = fromFlow(nodes, edges, name, target, passes);
       const created = await api<{ run_id: string }>("/api/graphs/run", {
         method: "POST",
-        body: JSON.stringify({ prompt, name, graph, provider, model }),
+        body: JSON.stringify({ prompt, name, graph, provider, model, max_tokens: maxTokens }),
       });
       nav(`/graph/${created.run_id}`);
     } catch (err) {
@@ -308,6 +309,8 @@ function DesignerInner() {
           <input type="range" min={0.5} max={1} step={0.01} value={target} onChange={(e) => setTarget(Number(e.target.value))} />
           <label>Max graph passes</label>
           <input type="number" min={1} max={12} value={passes} onChange={(e) => setPasses(Number(e.target.value))} />
+          <label>Token budget</label>
+          <input type="number" min={2000} value={maxTokens} onChange={(e) => setMaxTokens(Number(e.target.value))} />
           {selectedNode && (
             <>
               <h3>This node on the canvas</h3>

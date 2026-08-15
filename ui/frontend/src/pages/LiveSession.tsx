@@ -32,8 +32,10 @@ type Detail = {
 
 function wsUrl(runId: string): string {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  if (import.meta.env.DEV) return `${proto}://127.0.0.1:8000/ws/runs/${runId}`;
-  return `${proto}://${location.host}/ws/runs/${runId}`;
+  const token = encodeURIComponent((window.localStorage.getItem("actuate_console_token") || ""));
+  const q = token ? `?token=${token}` : "";
+  if (import.meta.env.DEV) return `${proto}://127.0.0.1:8000/ws/runs/${runId}${q}`;
+  return `${proto}://${location.host}/ws/runs/${runId}${q}`;
 }
 
 const STAGES = [
@@ -157,7 +159,7 @@ export default function LiveSession() {
         <span className="chip">score {detail?.best_score?.toFixed(3)}</span>
         <span className="chip">{(detail?.latency_seconds ?? 0).toFixed(2)}s · {detail?.tokens ?? 0} tok</span>
       </div>
-      <div className="hero">
+      <div className="hero live-session">
         <div className="card">
           <h3>Click a node</h3>
           {STAGES.map((s, i) => (
@@ -181,29 +183,35 @@ export default function LiveSession() {
           <pre>{io.input}</pre>
           <p className="sub">Output from this node</p>
           <pre>{io.output}</pre>
-          <h3>All iterations</h3>
+          <h3>Iterations</h3>
+          <p className="sub">Select a row — it opens as the detail panel, not a separate modal.</p>
           {(detail?.iterations || []).map((it) => (
-            <div className={`iter ${open === it.index ? "open" : ""}`} key={it.index}>
-              <header onClick={() => setOpen(it.index)}>
-                <span>Iteration {it.index}</span>
-                <span className="mono">score {it.score == null ? "…" : it.score.toFixed(3)} · {it.tokens ?? 0} tok · {(it.latency_seconds ?? 0).toFixed(2)}s</span>
-              </header>
-              {open === it.index && (
-                <>
-                  <p className="sub">Plant prompt</p>
-                  <pre>{it.prompt}</pre>
-                  <p className="sub">Plant output</p>
-                  <pre>{it.output}</pre>
-                  <p className="sub">Sensor</p>
-                  <pre>{it.feedback.join("\n")}</pre>
-                  <p className="sub">Actuator next prompt</p>
-                  <pre>{it.correction || "(none — this was the last iteration)"}</pre>
-                </>
-              )}
-            </div>
+            <button
+              type="button"
+              className={`iter-rail-item ${open === it.index ? "on" : ""}`}
+              key={it.index}
+              onClick={() => setOpen(it.index)}
+            >
+              <span>Iteration {it.index}</span>
+              <span className="mono">score {it.score == null ? "…" : it.score.toFixed(3)} · {it.tokens ?? 0} tok</span>
+            </button>
           ))}
         </div>
-        <div className="card" style={{ overflow: "auto" }}>
+        <div className={`card iter-detail ${open ? "open" : ""}`} style={{ overflow: "auto" }}>
+          <h3>Iteration {view?.index ?? "—"} detail</h3>
+          <div className="chips">
+            <span className="chip">score {view?.score?.toFixed(3) ?? "—"}</span>
+            <span className="chip">{view?.tokens ?? 0} tok</span>
+            <span className="chip">{(view?.latency_seconds ?? 0).toFixed(2)}s</span>
+          </div>
+          <p className="sub">Plant prompt</p>
+          <pre>{view?.prompt}</pre>
+          <p className="sub">Plant output</p>
+          <pre>{view?.output}</pre>
+          <p className="sub">Sensor</p>
+          <pre>{(view?.feedback || []).join("\n")}</pre>
+          <p className="sub">Actuator next prompt</p>
+          <pre>{view?.correction || "(none — this was the last iteration)"}</pre>
           <h3>Metrics</h3>
           <ScoreChart data={chart} />
           <MetricChart data={tokenChart} dataKey="tokens" color="#8b7cff" />
