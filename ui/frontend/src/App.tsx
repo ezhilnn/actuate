@@ -1,4 +1,5 @@
 import { NavLink, Route, Routes } from "react-router-dom";
+import { useEffect, useState } from "react";
 import Dashboard from "./pages/Dashboard";
 import NewRun from "./pages/NewRun";
 import LiveSession from "./pages/LiveSession";
@@ -27,10 +28,23 @@ const links = [
 ];
 
 export default function App() {
+  const [boot, setBoot] = useState(true);
+  useEffect(() => {
+    const t = window.setTimeout(() => setBoot(false), 700);
+    return () => window.clearTimeout(t);
+  }, []);
   return (
     <div className="shell">
+      {boot && (
+        <div className="boot-full">
+          <div className="boot-orb" />
+          <p>Actuate</p>
+          <span>closed-loop control for agents</span>
+        </div>
+      )}
       <aside className="sidebar">
         <div className="brand"><span /> ACTUATE</div>
+        <p className="side-tag">Agentic control console</p>
         <nav className="nav">
           {links.map(([to, label]) => (
             <NavLink key={to} to={to} end={to === "/"} className={({ isActive }) => (isActive ? "active" : "")}>

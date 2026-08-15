@@ -267,4 +267,102 @@ def templates() -> list[dict[str, Any]]:
             [_e("a", "in", "da"), _e("b", "in", "vz"), _e("c", "da", "ex"), _e("d", "vz", "ex"),
              _e("e", "ex", "j"), _e("f", "j", "out")],
         ),
+        *_layered_labs(),
+    ]
+
+
+def _layered_labs() -> list[dict[str, Any]]:
+    def lab(gid: str, name: str, blurb: str, layers: list[list[str]]) -> dict[str, Any]:
+        nodes: list[dict[str, Any]] = []
+        edges: list[dict[str, str]] = []
+        prev: list[str] = []
+        ei = 0
+        for r, layer in enumerate(layers):
+            ids: list[str] = []
+            for i, agent in enumerate(layer):
+                nid = f"{gid}_{r}_{i}"
+                nodes.append(_n(nid, agent, i * 200, r * 140))
+                ids.append(nid)
+            for a, b in zip(ids, ids[1:]):
+                edges.append(_e(f"{gid}_h{ei}", a, b))
+                ei += 1
+            if prev:
+                for i, cid in enumerate(ids):
+                    pid = prev[min(i, len(prev) - 1)]
+                    edges.append(_e(f"{gid}_v{ei}", pid, cid))
+                    ei += 1
+            prev = ids
+        return _graph(gid, name, blurb, nodes, edges, score=0.88)
+
+    return [
+        lab(
+            "data_science_lab",
+            "Data science lab (22 nodes)",
+            "Research → engineering → stats/ML → critique → writing → four judges. For real analysis questions.",
+            [
+                ["ingress"],
+                ["researcher", "librarian", "data_engineer", "data_scientist"],
+                ["statistician", "ml_engineer", "experimenter", "data_analyst"],
+                ["viz_spec", "critic", "qa", "ethics"],
+                ["synthesizer", "writer", "editor", "accessibility"],
+                ["judge_accuracy", "judge_complete", "judge_safety", "judge_clarity"],
+                ["egress"],
+            ],
+        ),
+        lab(
+            "research_institute",
+            "Research institute (24 nodes)",
+            "Literature, facts, science communication, citations, red team, judges.",
+            [
+                ["ingress"],
+                ["researcher", "librarian", "fact_checker", "citation"],
+                ["science_comm", "statistician", "data_analyst", "critic"],
+                ["ethics", "safety", "red_team", "inclusion"],
+                ["synthesizer", "explainer", "editor", "accessibility"],
+                ["judge_accuracy", "judge_complete", "judge_safety", "judge_clarity"],
+                ["egress"],
+            ],
+        ),
+        lab(
+            "public_health_ops",
+            "Public health operations (22 nodes)",
+            "Health information with epidemiology, safety, accessibility, and civic briefing.",
+            [
+                ["ingress"],
+                ["medical_info", "epidemiologist", "public_health", "community"],
+                ["fact_checker", "risk", "inclusion", "accessibility"],
+                ["synthesizer", "writer", "youth_safe", "editor"],
+                ["judge_safety", "judge_accuracy", "judge_clarity", "judge_complete"],
+                ["controller_agent", "actuator_agent"],
+                ["egress"],
+            ],
+        ),
+        lab(
+            "civic_policy_machine",
+            "Civic policy machine (23 nodes)",
+            "Policy options, economics, stakeholders, legal plain language, ethics.",
+            [
+                ["ingress"],
+                ["civic", "policy_brief", "economist", "stakeholder"],
+                ["legal_plain", "inclusion", "ethics", "risk"],
+                ["critic", "fact_checker", "misinfo", "community"],
+                ["synthesizer", "writer", "editor", "accessibility"],
+                ["judge_accuracy", "judge_complete", "judge_safety", "judge_clarity"],
+                ["egress"],
+            ],
+        ),
+        lab(
+            "product_knowledge_factory",
+            "Product knowledge factory (21 nodes)",
+            "Product, docs, QA, experiments, and safety gates for a useful public artifact.",
+            [
+                ["ingress"],
+                ["product", "planner", "researcher", "data_scientist"],
+                ["experimenter", "qa", "docs", "code_review"],
+                ["critic", "ethics", "safety", "inclusion"],
+                ["writer", "editor", "accessibility", "synthesizer"],
+                ["judge_complete", "judge_clarity", "judge_safety"],
+                ["egress"],
+            ],
+        ),
     ]

@@ -83,6 +83,7 @@ class GraphRunner:
         prompt: str,
         context: dict[str, Any] | None = None,
         run_id: str | None = None,
+        overrides: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         run_id = run_id or uuid.uuid4().hex
         nodes = {n["id"]: n for n in graph["nodes"]}
@@ -101,14 +102,18 @@ class GraphRunner:
                 "latency_seconds": 0.0,
                 "tokens": 0,
                 "passes": 0,
+                "steps": [],
             }
             for nid in nodes
         }
         ctx = dict(context or {})
+        overrides = overrides or {}
         started = time.monotonic()
         await self._emit({"kind": "GraphStarted", "run_id": run_id, "graph": graph.get("id")})
 
         async def inputs_for(nid: str) -> list[str]:
+            if nid in overrides:
+                return [overrides[nid]]
             parents = _parents(nid, edges)
             if not parents:
                 return [prompt]
@@ -158,6 +163,18 @@ class GraphRunner:
                         system=spec["system"], prompt=user_blob, context=ctx
                     )
 
+                traces[nid]["steps"] = traces[nid].get("steps") or []
+                traces[nid]["steps"].append(
+                    {
+                        "pass": pass_index,
+                        "input": traces[nid]["inputs"][-1],
+                        "output": text,
+                        "score": traces[nid]["scores"][-1] if spec["kind"] == "judge" and traces[nid]["scores"] else None,
+                        "feedback": traces[nid]["feedback"][-1] if traces[nid]["feedback"] else None,
+                        "latency_seconds": latency,
+                        "tokens": tokens,
+                    }
+                )
                 traces[nid]["outputs"].append(text)
                 traces[nid]["latency_seconds"] += latency
                 traces[nid]["tokens"] += tokens
@@ -198,6 +215,8 @@ class GraphRunner:
             "tokens": sum(t["tokens"] for t in traces.values()),
             "traces": list(traces.values()),
             "graph": graph,
+            "overrides": overrides,
+            "parent_run_id": ctx.get("parent_run_id"),
         }
         await self._emit({"kind": "GraphFinished", "run_id": run_id, "status": status})
         return result
