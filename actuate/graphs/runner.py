@@ -1,17 +1,30 @@
-"""Execute a user-designed agent graph until judges pass or passes exhaust."""
+"""Execute a user-designed agent graph until judges pass, budget trips, or passes exhaust.
+
+Ready nodes with no unfinished parents run in parallel (asyncio.gather).
+A node that fans out to three children publishes once; those children start together.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
 from collections import defaultdict, deque
 from typing import Any, Awaitable, Callable
 
-from actuate.domain.protocols import Generator, MeteredGenerator
+from actuate.domain.protocols import Generator
+from actuate.graphs.agent import llm_once, run_specialist
 from actuate.graphs.catalog import agent_by_id
 
 LogFn = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+class BudgetExceeded(RuntimeError):
+    def __init__(self, tokens: int, cap: int) -> None:
+        super().__init__(f"Token budget exceeded ({tokens} > {cap})")
+        self.tokens = tokens
+        self.cap = cap
 
 
 def topological_order(nodes: list[dict[str, Any]], edges: list[dict[str, str]]) -> list[str]:
@@ -41,6 +54,22 @@ def _parents(node_id: str, edges: list[dict[str, str]]) -> list[str]:
     return [e["source"] for e in edges if e["target"] == node_id]
 
 
+def _children(node_id: str, edges: list[dict[str, str]]) -> list[str]:
+    return [e["target"] for e in edges if e["source"] == node_id]
+
+
+def descendants(start: str, edges: list[dict[str, str]]) -> set[str]:
+    found: set[str] = set()
+    stack = [start]
+    while stack:
+        nid = stack.pop()
+        if nid in found:
+            continue
+        found.add(nid)
+        stack.extend(_children(nid, edges))
+    return found
+
+
 def _parse_judge(raw: str) -> tuple[float, str, bool]:
     try:
         start = raw.find("{")
@@ -54,27 +83,36 @@ def _parse_judge(raw: str) -> tuple[float, str, bool]:
         return 0.0, raw, False
 
 
+def _title(agent_id: str) -> str:
+    try:
+        return str(agent_by_id(agent_id)["title"])
+    except KeyError:
+        return agent_id
+
+
 class GraphRunner:
-    def __init__(self, generator: Generator, *, log: LogFn | None = None) -> None:
+    def __init__(
+        self,
+        generator: Generator,
+        *,
+        log: LogFn | None = None,
+        memory: Any | None = None,
+        max_tokens: int = 250_000,
+    ) -> None:
         self.generator = generator
         self.log = log
+        self.memory = memory
+        self.max_tokens = max(1, int(max_tokens))
+        self._tokens_used = 0
 
     async def _emit(self, payload: dict[str, Any]) -> None:
         if self.log:
             await self.log(payload)
 
-    async def _call(
-        self, *, system: str, prompt: str, context: dict[str, Any]
-    ) -> tuple[str, float, int]:
-        ctx = dict(context)
-        if system:
-            ctx["system"] = system
-        start = time.monotonic()
-        if isinstance(self.generator, MeteredGenerator):
-            outcome = await self.generator.generate_with_metadata(prompt, context=ctx)
-            return outcome.text, outcome.latency_seconds, outcome.prompt_tokens + outcome.completion_tokens
-        text = await self.generator.generate(prompt, context=ctx)
-        return text, time.monotonic() - start, 0
+    def _charge(self, tokens: int) -> None:
+        self._tokens_used += int(tokens or 0)
+        if self._tokens_used > self.max_tokens:
+            raise BudgetExceeded(self._tokens_used, self.max_tokens)
 
     async def run(
         self,
@@ -84,6 +122,8 @@ class GraphRunner:
         context: dict[str, Any] | None = None,
         run_id: str | None = None,
         overrides: dict[str, str] | None = None,
+        prior_traces: dict[str, dict[str, Any]] | None = None,
+        rerun_from: str | None = None,
     ) -> dict[str, Any]:
         run_id = run_id or uuid.uuid4().hex
         nodes = {n["id"]: n for n in graph["nodes"]}
@@ -91,10 +131,18 @@ class GraphRunner:
         order = topological_order(list(nodes.values()), edges)
         target = float(graph.get("target_score") or 0.85)
         max_passes = int(graph.get("max_passes") or 4)
+        freeze = set()
+        if rerun_from and rerun_from in nodes:
+            freeze = set(nodes) - descendants(rerun_from, edges)
+            if prior_traces:
+                freeze = {nid for nid in freeze if (prior_traces.get(nid) or {}).get("outputs")}
+            else:
+                freeze = set()
         traces: dict[str, dict[str, Any]] = {
             nid: {
                 "node_id": nid,
                 "agent": nodes[nid]["agent"],
+                "title": _title(nodes[nid]["agent"]),
                 "inputs": [],
                 "outputs": [],
                 "scores": [],
@@ -103,15 +151,38 @@ class GraphRunner:
                 "tokens": 0,
                 "passes": 0,
                 "steps": [],
+                "tools": [],
+                "frozen": nid in freeze,
             }
             for nid in nodes
         }
+        if prior_traces:
+            for nid, old in prior_traces.items():
+                if nid in traces and nid in freeze:
+                    traces[nid]["outputs"] = list(old.get("outputs") or [])
+                    traces[nid]["inputs"] = list(old.get("inputs") or [])
+                    traces[nid]["scores"] = list(old.get("scores") or [])
+                    traces[nid]["feedback"] = list(old.get("feedback") or [])
+                    traces[nid]["steps"] = list(old.get("steps") or [])
+                    traces[nid]["tokens"] = int(old.get("tokens") or 0)
+                    traces[nid]["latency_seconds"] = float(old.get("latency_seconds") or 0)
         ctx = dict(context or {})
         overrides = overrides or {}
         started = time.monotonic()
-        await self._emit({"kind": "GraphStarted", "run_id": run_id, "graph": graph.get("id")})
+        status = "exhausted"
+        pass_index = 0
+        await self._emit(
+            {
+                "kind": "GraphStarted",
+                "run_id": run_id,
+                "graph": graph.get("id"),
+                "name": graph.get("name"),
+                "max_tokens": self.max_tokens,
+                "rerun_from": rerun_from,
+            }
+        )
 
-        async def inputs_for(nid: str) -> list[str]:
+        def inputs_for(nid: str) -> list[str]:
             if nid in overrides:
                 return [overrides[nid]]
             parents = _parents(nid, edges)
@@ -123,77 +194,161 @@ class GraphRunner:
                 collected.append(outs[-1] if outs else "")
             return [c for c in collected if c] or [prompt]
 
-        for pass_index in range(1, max_passes + 1):
-            all_judges_ok = True
-            for nid in order:
-                node = nodes[nid]
-                spec = agent_by_id(node["agent"])
-                incoming = await inputs_for(nid)
-                traces[nid]["inputs"].append("\n\n---\n\n".join(incoming))
-                traces[nid]["passes"] = pass_index
-                await self._emit({"kind": "NodeStarted", "run_id": run_id, "node_id": nid, "agent": node["agent"]})
+        async def execute(nid: str, pass_index: int) -> None:
+            node = nodes[nid]
+            spec = agent_by_id(node["agent"])
+            title = _title(node["agent"])
+            if nid in freeze and traces[nid]["outputs"]:
+                await self._emit(
+                    {
+                        "kind": "NodeSkipped",
+                        "run_id": run_id,
+                        "node_id": nid,
+                        "agent": node["agent"],
+                        "title": title,
+                        "reason": "frozen from parent run",
+                    }
+                )
+                return
 
+            incoming = inputs_for(nid)
+            joined = "\n\n---\n\n".join(incoming)
+            traces[nid]["inputs"].append(joined)
+            traces[nid]["passes"] = pass_index
+            kids = [_title(nodes[c]["agent"]) for c in _children(nid, edges) if c in nodes]
+            await self._emit(
+                {
+                    "kind": "NodeStarted",
+                    "run_id": run_id,
+                    "node_id": nid,
+                    "agent": node["agent"],
+                    "title": title,
+                    "pass": pass_index,
+                    "input": joined[:8000],
+                    "fan_out": kids,
+                }
+            )
+
+            tool_trail: list[dict[str, Any]] = []
+            score: float | None = None
+            feedback: str | None = None
+            try:
                 if spec["kind"] == "io" and spec["id"] == "ingress":
-                    text = prompt
-                    latency, tokens = 0.0, 0
+                    text, latency, tokens = prompt, 0.0, 0
                 elif spec["kind"] == "io" and spec["id"] == "egress":
-                    text = incoming[-1] if incoming else prompt
-                    latency, tokens = 0.0, 0
+                    text, latency, tokens = (incoming[-1] if incoming else prompt), 0.0, 0
                 elif spec["kind"] == "judge":
                     judge_prompt = (
                         f"User goal:\n{prompt}\n\nCandidate:\n{incoming[-1] if incoming else ''}\n"
                         f"Target score: {target}"
                     )
-                    text, latency, tokens = await self._call(
-                        system=spec["system"], prompt=judge_prompt, context=ctx
+                    text, latency, tokens = await llm_once(
+                        self.generator, system=spec["system"], prompt=judge_prompt, context=ctx
                     )
-                    score, feedback, passed = _parse_judge(text)
-                    traces[nid]["scores"].append(score)
-                    traces[nid]["feedback"].append(feedback)
-                    if score < target or not passed:
-                        all_judges_ok = False
+                    parsed_score, parsed_fb, passed = _parse_judge(text)
+                    score, feedback = parsed_score, parsed_fb
+                    traces[nid]["scores"].append(parsed_score)
+                    traces[nid]["feedback"].append(parsed_fb)
+                    if parsed_score < target or not passed:
                         for parent in _parents(nid, edges):
-                            traces[parent]["feedback"].append(feedback)
+                            traces[parent]["feedback"].append(parsed_fb)
                 else:
                     revision = ""
                     if traces[nid]["feedback"]:
                         revision = "\n\nJudge feedback to address:\n" + traces[nid]["feedback"][-1]
                     user_blob = "\n\n".join(incoming) + revision
-                    text, latency, tokens = await self._call(
-                        system=spec["system"], prompt=user_blob, context=ctx
-                    )
-
-                traces[nid]["steps"] = traces[nid].get("steps") or []
-                traces[nid]["steps"].append(
-                    {
-                        "pass": pass_index,
-                        "input": traces[nid]["inputs"][-1],
-                        "output": text,
-                        "score": traces[nid]["scores"][-1] if spec["kind"] == "judge" and traces[nid]["scores"] else None,
-                        "feedback": traces[nid]["feedback"][-1] if traces[nid]["feedback"] else None,
-                        "latency_seconds": latency,
-                        "tokens": tokens,
-                    }
-                )
-                traces[nid]["outputs"].append(text)
-                traces[nid]["latency_seconds"] += latency
-                traces[nid]["tokens"] += tokens
-                await self._emit(
-                    {
-                        "kind": "NodeCompleted",
-                        "run_id": run_id,
+                    agent_ctx = {
+                        **ctx,
+                        "graph": graph,
                         "node_id": nid,
                         "agent": node["agent"],
-                        "pass": pass_index,
-                        "output_preview": text[:280],
+                        "agent_title": title,
+                        "user_goal": prompt,
+                        "memory": self.memory,
                     }
-                )
+                    text, latency, tokens, tool_trail = await run_specialist(
+                        self.generator, system=spec["system"], prompt=user_blob, context=agent_ctx
+                    )
+            except BudgetExceeded:
+                raise
+            self._charge(tokens)
 
-            if all_judges_ok:
-                status = "converged"
-                break
-        else:
-            status = "exhausted"
+            traces[nid]["steps"].append(
+                {
+                    "pass": pass_index,
+                    "input": joined,
+                    "output": text,
+                    "score": score,
+                    "feedback": feedback,
+                    "latency_seconds": latency,
+                    "tokens": tokens,
+                    "tools": tool_trail,
+                }
+            )
+            traces[nid]["outputs"].append(text)
+            traces[nid]["latency_seconds"] += latency
+            traces[nid]["tokens"] += tokens
+            traces[nid]["tools"] = list(traces[nid].get("tools") or []) + tool_trail
+            await self._emit(
+                {
+                    "kind": "NodeCompleted",
+                    "run_id": run_id,
+                    "node_id": nid,
+                    "agent": node["agent"],
+                    "title": title,
+                    "pass": pass_index,
+                    "input": joined[:8000],
+                    "output": text[:8000],
+                    "tokens": tokens,
+                    "latency_seconds": round(latency, 4),
+                    "tools": [t.get("tool") for t in tool_trail],
+                    "delivered_in_parallel_to": kids,
+                }
+            )
+
+        try:
+            for pass_index in range(1, max_passes + 1):
+                remaining = {nid for nid in nodes if nid not in freeze or not traces[nid]["outputs"]}
+                if rerun_from:
+                    remaining = {nid for nid in remaining if nid not in freeze}
+                done_this_pass: set[str] = {nid for nid in freeze if traces[nid]["outputs"]}
+                if pass_index == 1:
+                    for nid in sorted(freeze):
+                        await execute(nid, pass_index)
+                while remaining:
+                    ready = []
+                    for nid in list(remaining):
+                        pars = _parents(nid, edges)
+                        if all(p in done_this_pass or p not in nodes for p in pars):
+                            ready.append(nid)
+                    if not ready:
+                        raise ValueError("Graph stalled: a node is waiting on an unfinished dependency.")
+                    await asyncio.gather(*(execute(nid, pass_index) for nid in ready))
+                    done_this_pass.update(ready)
+                    remaining -= set(ready)
+
+                judges = [nid for nid in nodes if agent_by_id(nodes[nid]["agent"])["kind"] == "judge"]
+                all_ok = True
+                for nid in judges:
+                    scores = traces[nid]["scores"]
+                    if not scores or scores[-1] < target:
+                        all_ok = False
+                        break
+                if all_ok:
+                    status = "converged"
+                    break
+            else:
+                status = "exhausted"
+        except BudgetExceeded as exc:
+            status = "budget_exceeded"
+            await self._emit(
+                {
+                    "kind": "BudgetExceeded",
+                    "run_id": run_id,
+                    "tokens": exc.tokens,
+                    "cap": exc.cap,
+                }
+            )
 
         egress_ids = [n["id"] for n in graph["nodes"] if n["agent"] == "egress"]
         final = ""
@@ -213,10 +368,12 @@ class GraphRunner:
             "passes": pass_index,
             "latency_seconds": time.monotonic() - started,
             "tokens": sum(t["tokens"] for t in traces.values()),
+            "max_tokens": self.max_tokens,
             "traces": list(traces.values()),
             "graph": graph,
             "overrides": overrides,
             "parent_run_id": ctx.get("parent_run_id"),
+            "rerun_from": rerun_from,
         }
-        await self._emit({"kind": "GraphFinished", "run_id": run_id, "status": status})
+        await self._emit({"kind": "GraphFinished", "run_id": run_id, "status": status, "tokens": result["tokens"]})
         return result

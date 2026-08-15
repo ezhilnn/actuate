@@ -1,8 +1,28 @@
+const TOKEN_KEY = "actuate_console_token";
+
+export function getToken(): string {
+  return localStorage.getItem(TOKEN_KEY) || "";
+}
+
+export function setToken(token: string) {
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+  else localStorage.removeItem(TOKEN_KEY);
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getToken();
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers || {}),
+    },
     ...init,
   });
+  if (response.status === 401) {
+    window.dispatchEvent(new Event("actuate-auth"));
+    throw new Error("401 Unauthorized — set the console token in Settings.");
+  }
   if (!response.ok) {
     throw new Error(`${response.status} ${await response.text()}`);
   }
