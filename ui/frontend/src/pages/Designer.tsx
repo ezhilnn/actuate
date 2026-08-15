@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import ReactFlow, {
   addEdge,
@@ -6,8 +6,10 @@ import ReactFlow, {
   Connection,
   Controls,
   Edge,
+  EdgeChange,
   MiniMap,
   Node,
+  NodeChange,
   ReactFlowProvider,
   useEdgesState,
   useNodesState,
@@ -24,7 +26,7 @@ type Template = {
   id: string;
   name: string;
   blurb: string;
-  nodes: { id: string; agent: string; x: number; y: number; label?: string }[];
+  nodes: { id: string; agent: string; x: number; y: number; label?: string; system?: string; kind?: string }[];
   edges: { id: string; source: string; target: string }[];
   target_score: number;
   max_passes: number;
@@ -45,6 +47,7 @@ function toFlow(template: Template, agents: Agent[]): { nodes: Node[]; edges: Ed
           kind: spec?.kind || "agent",
           color: spec?.color || "#3d8bfd",
           blurb: spec?.blurb || "",
+          system: n.system || spec?.system || "",
         },
       };
     }),
@@ -69,8 +72,19 @@ function fromFlow(nodes: Node[], edges: Edge[], name: string, target: number, pa
       x: n.position.x,
       y: n.position.y,
       label: n.data.title,
+      system: n.data.system || "",
+      kind: n.data.kind,
     })),
     edges: edges.map((e) => ({ id: e.id, source: e.source, target: e.target })),
+  };
+}
+
+type Snap = { nodes: Node[]; edges: Edge[] };
+
+function cloneSnap(nodes: Node[], edges: Edge[]): Snap {
+  return {
+    nodes: nodes.map((n) => ({ ...n, position: { ...n.position }, data: { ...n.data } })),
+    edges: edges.map((e) => ({ ...e })),
   };
 }
 
@@ -97,6 +111,60 @@ function DesignerInner() {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [q, setQ] = useState("");
+  const [customTitle, setCustomTitle] = useState("");
+  const [customSystem, setCustomSystem] = useState("");
+  const pastRef = useRef<Snap[]>([]);
+  const futureRef = useRef<Snap[]>([]);
+  const applyingRef = useRef(false);
+
+  const record = useCallback(() => {
+    if (applyingRef.current) return;
+    pastRef.current.push(cloneSnap(nodes, edges));
+    if (pastRef.current.length > 80) pastRef.current.shift();
+    futureRef.current = [];
+  }, [nodes, edges]);
+
+  const undo = useCallback(() => {
+    const prev = pastRef.current.pop();
+    if (!prev) return;
+    futureRef.current.push(cloneSnap(nodes, edges));
+    applyingRef.current = true;
+    setNodes(prev.nodes);
+    setEdges(prev.edges);
+    queueMicrotask(() => {
+      applyingRef.current = false;
+    });
+  }, [nodes, edges, setNodes, setEdges]);
+
+  const redo = useCallback(() => {
+    const next = futureRef.current.pop();
+    if (!next) return;
+    pastRef.current.push(cloneSnap(nodes, edges));
+    applyingRef.current = true;
+    setNodes(next.nodes);
+    setEdges(next.edges);
+    queueMicrotask(() => {
+      applyingRef.current = false;
+    });
+  }, [nodes, edges, setNodes, setEdges]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const el = event.target as HTMLElement | null;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
+      const key = event.key.toLowerCase();
+      if (!(event.ctrlKey || event.metaKey)) return;
+      if (key === "z" && !event.shiftKey) {
+        event.preventDefault();
+        undo();
+      } else if (key === "y" || (key === "z" && event.shiftKey)) {
+        event.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undo, redo]);
 
   useEffect(() => {
     Promise.all([
@@ -126,16 +194,18 @@ function DesignerInner() {
 
   const onConnect = useCallback(
     (c: Connection) => {
+      record();
       const id = `e-${Date.now()}`;
       setEdges((eds) => addEdge({ ...c, id, animated: true, className: "edge-new" }, eds));
       window.setTimeout(() => {
         setEdges((eds) => eds.map((e) => (e.id === id || (e.source === c.source && e.target === c.target) ? { ...e, animated: false, className: "" } : e)));
       }, 420);
     },
-    [setEdges],
+    [record, setEdges],
   );
 
   const applyTemplate = (tpl: Template) => {
+    record();
     const flow = toFlow(tpl, agents);
     setNodes(flow.nodes);
     setEdges(flow.edges);
@@ -152,6 +222,7 @@ function DesignerInner() {
       const spec: Agent = JSON.parse(raw);
       const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
       const id = `${spec.id}-${Math.random().toString(36).slice(2, 7)}`;
+      record();
       setNodes((nds) => [
         ...nds,
         {
@@ -169,7 +240,23 @@ function DesignerInner() {
         },
       ]);
     },
-    [screenToFlowPosition, setNodes],
+    [record, screenToFlowPosition, setNodes],
+  );
+
+  const handleNodesChange = useCallback(
+    (changes: NodeChange[]) => {
+      if (changes.some((c) => c.type === "remove" || c.type === "add")) record();
+      onNodesChange(changes);
+    },
+    [onNodesChange, record],
+  );
+
+  const handleEdgesChange = useCallback(
+    (changes: EdgeChange[]) => {
+      if (changes.some((c) => c.type === "remove" || c.type === "add")) record();
+      onEdgesChange(changes);
+    },
+    [onEdgesChange, record],
   );
 
   const selectedNode = nodes.find((n) => n.id === selected);
@@ -211,16 +298,66 @@ function DesignerInner() {
         <div>
           <h1>Loop / graph designer</h1>
           <p className="sub">
-            Drag specialized agents, connect them, or load a template. Judges keep the graph running until the output is accurate enough.
+            Drag specialized agents, connect them, or load a template. Ctrl+Z undoes, Ctrl+Y redoes. Judges keep the graph running until the output is accurate enough.
           </p>
         </div>
-        <button className="primary" type="button" onClick={start} style={{ marginTop: 0 }}>
-          Run graph
-        </button>
+        <div className="chips" style={{ alignSelf: "center" }}>
+          <button type="button" className="chip btn-press" onClick={undo}>Undo</button>
+          <button type="button" className="chip btn-press" onClick={redo}>Redo</button>
+          <button className="primary" type="button" onClick={start} style={{ marginTop: 0 }}>
+            Run graph
+          </button>
+        </div>
       </header>
       {error && <p className="sub" style={{ color: "var(--red)" }}>{error}</p>}
       <div className="designer-shell">
         <aside className="palette">
+          <h3>Your agent</h3>
+          <p className="sub">The system prompt is the job instructions for this node (not the user task below).</p>
+          <label>Name</label>
+          <input placeholder="e.g. Clinic memo writer" value={customTitle} onChange={(e) => setCustomTitle(e.target.value)} />
+          <label>System prompt</label>
+          <textarea
+            placeholder="You are … Write … Never …"
+            value={customSystem}
+            onChange={(e) => setCustomSystem(e.target.value)}
+            style={{ minHeight: 90 }}
+          />
+          <button
+            type="button"
+            className="ghost btn-press"
+            disabled={!customTitle.trim() || !customSystem.trim()}
+            onClick={async () => {
+              const created = await api<{ agent: Agent }>("/api/agents", {
+                method: "POST",
+                body: JSON.stringify({ title: customTitle.trim(), system: customSystem.trim(), kind: "agent" }),
+              });
+              const spec = created.agent;
+              setAgents((prev) => [spec, ...prev.filter((a) => a.id !== spec.id)]);
+              record();
+              const id = `${spec.id}-${Math.random().toString(36).slice(2, 7)}`;
+              setNodes((nds) => [
+                ...nds,
+                {
+                  id,
+                  type: "agent",
+                  position: { x: 180 + nds.length * 24, y: 80 + nds.length * 18 },
+                  data: {
+                    agent: spec.id,
+                    title: spec.title,
+                    kind: spec.kind,
+                    color: spec.color,
+                    blurb: spec.blurb,
+                    system: spec.system,
+                  },
+                },
+              ]);
+              setSelected(id);
+              setGuideId(spec.id);
+            }}
+          >
+            Add to canvas
+          </button>
           <h3>Agents</h3>
           <input placeholder="Search agents" value={q} onChange={(e) => setQ(e.target.value)} />
           {loading && (
@@ -255,9 +392,10 @@ function DesignerInner() {
           <ReactFlow
             nodes={nodes}
             edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
+            onNodesChange={handleNodesChange}
+            onEdgesChange={handleEdgesChange}
             onConnect={onConnect}
+            onNodeDragStart={() => record()}
             isValidConnection={(c) => Boolean(c.source && c.target && c.source !== c.target)}
             nodeTypes={nodeTypes}
             onNodeClick={(_, n) => {
@@ -280,6 +418,22 @@ function DesignerInner() {
         </div>
         <aside className="inspector">
           <AgentGuide agent={guideAgent} />
+          {selectedNode && (
+            <>
+              <h3>This node’s prompt</h3>
+              <p className="sub">Edit the system prompt used when this node runs. The Run settings prompt is the user task for the whole graph.</p>
+              <textarea
+                value={String(selectedNode.data.system || guideAgent?.system || "")}
+                onChange={(e) => {
+                  const text = e.target.value;
+                  setNodes((nds) =>
+                    nds.map((n) => (n.id === selectedNode.id ? { ...n, data: { ...n.data, system: text } } : n)),
+                  );
+                }}
+                style={{ minHeight: 140 }}
+              />
+            </>
+          )}
           <h3>Templates</h3>
           <input placeholder="Filter templates" value={filter} onChange={(e) => setFilter(e.target.value)} />
           <div className="tpl-list">
@@ -293,7 +447,7 @@ function DesignerInner() {
           <h3>Run settings</h3>
           <label>Graph name</label>
           <input value={name} onChange={(e) => setName(e.target.value)} />
-          <label>Prompt</label>
+          <label>User task (graph input)</label>
           <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} style={{ minHeight: 120 }} />
           <label>LLM plant</label>
           <select value={provider} onChange={(e) => setProvider(e.target.value)}>

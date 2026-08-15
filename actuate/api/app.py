@@ -47,7 +47,7 @@ from actuate.domain.specification import Specification, create_specification
 from actuate.domain.templates import standard_closed_loop
 from actuate.engine.execution_engine import ExecutionEngine
 from actuate.engine.graph import topology_as_dict
-from actuate.graphs import GraphRunner, list_agents, templates as graph_templates
+from actuate.graphs import GraphRunner, list_agents, register_agent, templates as graph_templates
 from actuate.memory import InMemoryVectorStore, LearningGraph, PostgresBackedVectors
 from actuate.persistence.in_memory_store import InMemoryRunStore
 from actuate.plants import PROVIDERS
@@ -491,6 +491,31 @@ def _generator(plant_name: str, params: dict[str, Any]) -> Any:
 @app.get("/api/agents")
 async def agents() -> dict[str, Any]:
     return {"agents": list_agents()}
+
+
+class CustomAgentBody(BaseModel):
+    id: str | None = None
+    title: str
+    system: str
+    kind: str = "agent"
+    blurb: str = "Custom agent"
+    color: str = "#3d8bfd"
+
+
+@app.post("/api/agents")
+async def create_agent(body: CustomAgentBody) -> dict[str, Any]:
+    ident = (body.id or body.title).strip().lower().replace(" ", "_")
+    spec = register_agent(
+        {
+            "id": ident,
+            "title": body.title.strip() or ident,
+            "system": body.system,
+            "kind": body.kind,
+            "blurb": body.blurb,
+            "color": body.color,
+        }
+    )
+    return {"agent": spec}
 
 
 @app.get("/api/graph-templates")
