@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, Provider } from "../api";
+import SlidingTabs from "../motion/SlidingTabs";
 
 type Template = {
   id: string;
@@ -122,10 +123,14 @@ export default function NewRun() {
       <p className="sub">
         Run a multi-agent graph (20+ specialists + judges) or a classic control loop. Both use a live LLM. Give the run a name you will recognize later.
       </p>
-      <div className="tabs">
-        <button type="button" className={mode === "graph" ? "on" : ""} onClick={() => setMode("graph")}>Multi-agent graph</button>
-        <button type="button" className={mode === "loop" ? "on" : ""} onClick={() => setMode("loop")}>Control loop</button>
-      </div>
+      <SlidingTabs
+        tabs={[
+          { id: "graph", label: "Multi-agent graph" },
+          { id: "loop", label: "Control loop" },
+        ]}
+        value={mode}
+        onChange={(id) => setMode(id as "graph" | "loop")}
+      />
       {error && <p className="sub" style={{ color: "var(--red)" }}>{error}</p>}
       <form className="form-grid" onSubmit={onSubmit}>
         <div className="card">
@@ -203,7 +208,7 @@ export default function NewRun() {
               <input value={phrases} onChange={(e) => setPhrases(e.target.value)} />
             </>
           )}
-          <button className="primary" type="submit">{mode === "graph" ? "Run graph" : "Start loop"}</button>
+          <button className="primary btn-press" type="submit">{mode === "graph" ? "Run graph" : "Start loop"}</button>
         </div>
       </form>
     </div>

@@ -3,7 +3,7 @@ import { Handle, Position, NodeProps } from "reactflow";
 export default function AgentFlowNode({ data, selected }: NodeProps) {
   return (
     <div
-      className={`agent-node ${data.kind} ${selected ? "sel" : ""} ${data.status || ""}`}
+      className={`agent-node ${data.kind} ${selected ? "sel" : ""} ${data.status || "idle"}`}
       style={{ borderColor: data.color }}
     >
       <Handle type="target" position={Position.Left} />

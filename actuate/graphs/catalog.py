@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from actuate.graphs.prompts import system_for
+
 Agent = dict[str, Any]
 
 _AGENTS: list[Agent] = [
@@ -231,4 +233,5 @@ def _enrich(item: Agent) -> Agent:
         "how_to": how_to,
         "receives": receives,
         "produces": produces,
+        "system": system_for(ident, str(item.get("system") or "")),
     }

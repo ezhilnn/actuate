@@ -52,7 +52,6 @@ function toFlow(template: Template, agents: Agent[]): { nodes: Node[]; edges: Ed
       id: e.id,
       source: e.source,
       target: e.target,
-      animated: true,
     })),
   };
 }
@@ -125,7 +124,13 @@ function DesignerInner() {
   }, [setEdges, setNodes]);
 
   const onConnect = useCallback(
-    (c: Connection) => setEdges((eds) => addEdge({ ...c, animated: true }, eds)),
+    (c: Connection) => {
+      const id = `e-${Date.now()}`;
+      setEdges((eds) => addEdge({ ...c, id, animated: true, className: "edge-new" }, eds));
+      window.setTimeout(() => {
+        setEdges((eds) => eds.map((e) => (e.id === id || (e.source === c.source && e.target === c.target) ? { ...e, animated: false, className: "" } : e)));
+      }, 420);
+    },
     [setEdges],
   );
 
@@ -252,6 +257,7 @@ function DesignerInner() {
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            isValidConnection={(c) => Boolean(c.source && c.target && c.source !== c.target)}
             nodeTypes={nodeTypes}
             onNodeClick={(_, n) => {
               setSelected(n.id);
@@ -259,7 +265,12 @@ function DesignerInner() {
             }}
             onPaneClick={() => setSelected(null)}
             fitView
+            minZoom={0.15}
+            maxZoom={1.75}
+            zoomOnScroll
+            panOnDrag
             deleteKeyCode={["Backspace", "Delete"]}
+            defaultEdgeOptions={{ type: "smoothstep" }}
           >
             <Background />
             <Controls />

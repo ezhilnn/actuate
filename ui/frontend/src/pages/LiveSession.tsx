@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, RunSummary } from "../api";
 import { MetricChart, ScoreChart } from "../charts";
+import { StatusChip } from "../motion/Kpi";
+import SlidingTabs from "../motion/SlidingTabs";
+import { useToast } from "../motion/Toasts";
 
 type Iteration = {
   index: number;
@@ -50,6 +53,8 @@ export default function LiveSession() {
   const [stage, setStage] = useState<(typeof STAGES)[number]["id"]>("plant");
   const [logs, setLogs] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const toast = useToast();
+  const lastStatus = useRef<string | null>(null);
 
   useEffect(() => {
     api<{ runs: RunSummary[] }>("/api/runs").then((d) => setRuns(d.runs)).catch(() => undefined);
@@ -65,6 +70,13 @@ export default function LiveSession() {
       const data = await api<Detail>(`/api/runs/${runId}`);
       setDetail(data);
       setLoading(false);
+      if (lastStatus.current && lastStatus.current !== data.status && data.status !== "running" && data.status !== "pending") {
+        toast(
+          data.status === "converged" ? "✓ Execution completed" : `Loop ${data.status}`,
+          `${data.iterations?.length ?? 0} iterations · ${(data.latency_seconds ?? 0).toFixed(2)}s`,
+        );
+      }
+      lastStatus.current = data.status;
       if (data.status === "running" || data.status === "pending") {
         timer = window.setTimeout(tick, 600);
       }
@@ -140,7 +152,7 @@ export default function LiveSession() {
       <div className="chips">
         <span className={`chip ${isStub ? "bad" : "ok"}`}>{isStub ? "MOCK" : `LIVE LLM · ${detail?.metadata?.provider}`}</span>
         <span className="chip">{detail?.metadata?.model}</span>
-        <span className="chip">{detail?.status}</span>
+        <span className="chip"><StatusChip status={detail?.status} /></span>
         <span className="chip">{detail?.iterations.length} iterations</span>
         <span className="chip">score {detail?.best_score?.toFixed(3)}</span>
         <span className="chip">{(detail?.latency_seconds ?? 0).toFixed(2)}s · {detail?.tokens ?? 0} tok</span>
@@ -171,7 +183,7 @@ export default function LiveSession() {
           <pre>{io.output}</pre>
           <h3>All iterations</h3>
           {(detail?.iterations || []).map((it) => (
-            <div className="iter" key={it.index}>
+            <div className={`iter ${open === it.index ? "open" : ""}`} key={it.index}>
               <header onClick={() => setOpen(it.index)}>
                 <span>Iteration {it.index}</span>
                 <span className="mono">score {it.score == null ? "…" : it.score.toFixed(3)} · {it.tokens ?? 0} tok · {(it.latency_seconds ?? 0).toFixed(2)}s</span>
@@ -195,11 +207,11 @@ export default function LiveSession() {
           <h3>Metrics</h3>
           <ScoreChart data={chart} />
           <MetricChart data={tokenChart} dataKey="tokens" color="#8b7cff" />
-          <div className="tabs">
-            {["output", "evaluation", "prompt", "events", "logs"].map((t) => (
-              <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>{t}</button>
-            ))}
-          </div>
+          <SlidingTabs
+            tabs={["output", "evaluation", "prompt", "events", "logs"].map((t) => ({ id: t, label: t }))}
+            value={tab}
+            onChange={setTab}
+          />
           {tab === "output" && <pre>{last?.output}</pre>}
           {tab === "evaluation" && <pre>{last?.feedback.join("\n")}</pre>}
           {tab === "prompt" && <pre>{last?.prompt}</pre>}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import ReactFlow, { Background, Controls, Edge, MiniMap, Node, ReactFlowProvider } from "reactflow";
 import "reactflow/dist/style.css";
@@ -6,6 +6,8 @@ import { api } from "../api";
 import { MetricChart, ScoreChart } from "../charts";
 import AgentFlowNode from "../graph/AgentFlowNode";
 import AgentGuide, { Agent } from "../graph/AgentGuide";
+import { StatusChip } from "../motion/Kpi";
+import { useToast } from "../motion/Toasts";
 
 const nodeTypes = { agent: AgentFlowNode };
 
@@ -28,7 +30,7 @@ type GraphRun = {
   prompt: string;
   output: string;
   traces: Trace[];
-  logs: { kind: string }[];
+  logs?: { kind: string; node_id?: string }[];
   graph: {
     name?: string;
     nodes: { id: string; agent: string; x: number; y: number; label?: string }[];
@@ -56,6 +58,8 @@ function GraphRunInner() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [tab, setTab] = useState(0);
+  const toast = useToast();
+  const lastStatus = useRef<string | null>(null);
 
   useEffect(() => {
     api<{ agents: Agent[] }>("/api/agents").then((d) => setAgents(d.agents)).catch(() => undefined);
@@ -67,6 +71,14 @@ function GraphRunInner() {
     const tick = async () => {
       const data = await api<GraphRun>(`/api/graph-runs/${runId}`);
       setRun(data);
+      if (lastStatus.current && lastStatus.current === "running" && data.status !== "running") {
+        const n = (data.traces || []).length;
+        toast(
+          data.status === "converged" || data.status === "completed" ? "✓ Execution completed" : `Run ${data.status}`,
+          `${data.passes ?? n} passes · ${(data.latency_seconds ?? 0).toFixed(2)}s`,
+        );
+      }
+      lastStatus.current = data.status;
       if (data.status === "running") timer = window.setTimeout(tick, 700);
     };
     tick();
@@ -88,10 +100,18 @@ function GraphRunInner() {
   }, [run]);
 
   const nodes: Node[] = useMemo(() => {
+    const started = new Set((run?.logs || []).filter((l) => l.kind === "NodeStarted").map((l) => (l as { node_id?: string }).node_id));
     return (run?.graph?.nodes || []).map((n) => {
       const t = traces[n.id];
       const lastScore = t?.scores[t.scores.length - 1];
-      const status = t?.outputs.length ? (run?.status === "running" ? "hot" : "done") : "";
+      let status = "idle";
+      if (run?.status === "running") {
+        if (t?.outputs.length) status = "completed";
+        else if (started.has(n.id) || t?.inputs.length) status = "running";
+        else status = "queued";
+      } else if (t?.outputs.length) {
+        status = lastScore != null && lastScore < 0.8 ? "failed" : "completed";
+      }
       return {
         id: n.id,
         type: "agent",
@@ -109,10 +129,32 @@ function GraphRunInner() {
     });
   }, [run, traces]);
 
-  const edges: Edge[] = useMemo(
-    () => (run?.graph?.edges || []).map((e) => ({ id: e.id, source: e.source, target: e.target, animated: run?.status === "running" })),
-    [run],
-  );
+  const edges: Edge[] = useMemo(() => {
+    const hot = new Set(
+      (run?.graph?.nodes || [])
+        .filter((n) => {
+          const t = traces[n.id];
+          return run?.status === "running" && t && t.inputs.length && !t.outputs.length;
+        })
+        .map((n) => n.id),
+    );
+    if (pick) {
+      hot.add(pick);
+    }
+    return (run?.graph?.edges || []).map((e) => {
+      const live = hot.has(e.source) || hot.has(e.target);
+      const selectedPath = Boolean(pick && (e.source === pick || e.target === pick));
+      return {
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        type: "smoothstep",
+        animated: live,
+        className: selectedPath ? "edge-live" : live ? "edge-flow" : "",
+        style: selectedPath ? { stroke: "#3d8bfd", strokeWidth: 2 } : undefined,
+      };
+    });
+  }, [run, traces, pick]);
 
   const picked = pick ? traces[pick] : undefined;
   const graphNode = run?.graph?.nodes.find((n) => n.id === pick);
@@ -129,7 +171,7 @@ function GraphRunInner() {
         <span className={`chip ${run?.plant === "stub" ? "bad" : "ok"}`}>
           {run?.plant === "stub" ? "MOCK" : `LIVE LLM · ${run?.provider || ""}`}
         </span>
-        <span className="chip">{run?.status}</span>
+        <span className="chip"><StatusChip status={run?.status} /></span>
         <span className="chip">{run?.passes ?? 0} passes</span>
         <span className="chip">{(run?.latency_seconds ?? 0).toFixed(2)}s</span>
         <span className="chip">{run?.tokens ?? 0} tok</span>
@@ -143,6 +185,10 @@ function GraphRunInner() {
             nodeTypes={nodeTypes}
             onNodeClick={(_, n) => setPick(n.id)}
             fitView
+            minZoom={0.15}
+            maxZoom={1.75}
+            zoomOnScroll
+            panOnDrag
             nodesDraggable={false}
           >
             <Background />
