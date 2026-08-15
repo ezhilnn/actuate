@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
+import { StatusChip } from "../motion/Kpi";
 
 type Row = {
   id: string;
@@ -19,17 +20,25 @@ type Row = {
 export default function Runs() {
   const [runs, setRuns] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
+  const [q, setQ] = useState("");
   useEffect(() => {
     api<{ runs: Row[] }>("/api/activity")
       .then((d) => setRuns(d.runs))
       .finally(() => setLoading(false));
   }, []);
-  if (loading) return <div className="boot inline"><div className="boot-orb" /><p>Loading runs…</p></div>;
+  const shown = runs.filter((r) => {
+    const n = q.trim().toLowerCase();
+    if (!n) return true;
+    return [r.name, r.kind, r.status, r.prompt].join(" ").toLowerCase().includes(n);
+  });
+  if (loading) return <div className="boot inline"><div className="boot-orb" /><p>Fetching results…</p></div>;
   return (
-    <div className="fade-in">
+    <div>
       <h1>Runs</h1>
-      <p className="sub">Every loop and graph, by name. Open one to inspect every node’s input and output.</p>
-      <div className="card">
+      <p className="sub">Every loop and graph, by name. Search does not reload the page.</p>
+      <input placeholder="Filter runs…" value={q} onChange={(e) => setQ(e.target.value)} />
+      <p className="sub search-count">{shown.length} matching</p>
+      <div className="card results-fade">
         <table>
           <thead>
             <tr>
@@ -37,13 +46,13 @@ export default function Runs() {
             </tr>
           </thead>
           <tbody>
-            {runs.map((run) => {
+            {shown.map((run) => {
               const href = run.href || (run.kind === "graph" ? `/graph/${run.id}` : `/live/${run.id}`);
               return (
-                <tr key={`${run.kind}-${run.id}`}>
+                <tr key={`${run.kind}-${run.id}`} className="row-enter">
                   <td><Link to={href}>{run.name || "Untitled"}</Link></td>
                   <td>{run.kind === "graph" ? "graph" : "loop"}</td>
-                  <td><span className={`status ${run.status}`}>{run.status}</span></td>
+                  <td><StatusChip status={run.status} /></td>
                   <td>{run.iterations ?? run.passes ?? 0}</td>
                   <td>{run.best_score?.toFixed(3) ?? "—"}</td>
                   <td>{Number(run.latency_seconds || 0).toFixed(2)}s</td>
@@ -53,7 +62,7 @@ export default function Runs() {
             })}
           </tbody>
         </table>
-        {!runs.length && <p className="sub">No runs yet. Use New Run → Multi-agent graph.</p>}
+        {!shown.length && <p className="sub">No runs yet. Use New Run → Multi-agent graph.</p>}
       </div>
     </div>
   );

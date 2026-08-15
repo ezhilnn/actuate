@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any
@@ -485,6 +486,7 @@ async def start_graph_run(body: GraphRunRequest) -> dict[str, str]:
     STATE.graph_runs[run_id] = {
         "id": run_id,
         "status": "running",
+        "started_at": time.time(),
         "name": display,
         "prompt": body.prompt,
         "graph": body.graph,
@@ -551,7 +553,10 @@ async def list_graph_runs() -> dict[str, Any]:
                 "tokens": item.get("tokens", 0),
                 "latency_seconds": item.get("latency_seconds", 0),
                 "passes": item.get("passes", 0),
+                "started_at": item.get("started_at"),
                 "prompt": (item.get("prompt") or "")[:240],
+                "provider": item.get("provider"),
+                "model": item.get("model"),
             }
         )
     return {"runs": list(reversed(list(rows)))}
@@ -710,28 +715,69 @@ async def get_run(run_id: str) -> dict[str, Any]:
 
 @app.get("/api/dashboard")
 async def dashboard() -> dict[str, Any]:
-    ids = await STATE.store.list_run_ids()
-    runs = [await _load_run(run_id) for run_id in ids]
-    summaries = [_run_summary(run) for run in runs]
-    running = sum(1 for row in summaries if row["status"] == "running")
-    finished = [row for row in summaries if row["status"] not in {"running", "pending"}]
-    success = [row for row in finished if row["status"] == "converged"]
-    scores = [row["best_score"] for row in summaries if row["best_score"] is not None]
+    feed = (await activity())["runs"]
+    loops = [row for row in feed if row.get("kind") == "loop"]
+    graphs = [row for row in feed if row.get("kind") == "graph"]
+    running_loops = sum(1 for row in loops if row.get("status") in {"running", "pending", "queued"})
+    running_graphs = sum(1 for row in graphs if row.get("status") in {"running", "pending", "queued"})
+    finished_loops = [row for row in loops if row.get("status") not in {"running", "pending", "queued"}]
+    success = [row for row in finished_loops if row.get("status") == "converged"]
+    scores = [row["best_score"] for row in loops if row.get("best_score") is not None]
+    latencies = [float(row.get("latency_seconds") or 0) for row in feed]
+    tokens = [int(row.get("tokens") or 0) for row in feed]
+    statuses: dict[str, int] = {}
+    providers: dict[str, int] = {}
+    for row in feed:
+        st = str(row.get("status") or "unknown")
+        statuses[st] = statuses.get(st, 0) + 1
+        prov = str(row.get("provider") or "unset")
+        providers[prov] = providers.get(prov, 0) + 1
+    memory_rows = STATE.vectors.rows()
+    tpls = graph_templates()
+    chronological = list(reversed(feed[:40]))
+    score_series = [
+        {"iteration": i + 1, "score": float(row["best_score"])}
+        for i, row in enumerate(chronological)
+        if row.get("best_score") is not None
+    ]
+    token_series = [{"iteration": i + 1, "tokens": int(row.get("tokens") or 0)} for i, row in enumerate(chronological)]
+    latency_series = [
+        {"iteration": i + 1, "latency": float(row.get("latency_seconds") or 0)} for i, row in enumerate(chronological)
+    ]
+    pass_series = [{"iteration": i + 1, "passes": int(row.get("iterations") or row.get("passes") or 0)} for i, row in enumerate(chronological)]
     return {
         "kpis": {
-            "running": running,
-            "success_rate": (len(success) / len(finished)) if finished else 0.0,
+            "running": running_loops + running_graphs,
+            "running_loops": running_loops,
+            "running_graphs": running_graphs,
+            "loop_count": len(loops),
+            "graph_count": len(graphs),
+            "success_rate": (len(success) / len(finished_loops)) if finished_loops else 0.0,
             "average_quality": (sum(scores) / len(scores)) if scores else 0.0,
             "average_iterations": (
-                sum(row["iterations"] for row in summaries) / len(summaries) if summaries else 0.0
+                sum(int(row.get("iterations") or 0) for row in loops) / len(loops) if loops else 0.0
             ),
-            "latency": (
-                sum(row["latency_seconds"] for row in summaries) / len(summaries) if summaries else 0.0
-            ),
-            "tokens": sum(row["tokens"] for row in summaries),
+            "latency": (sum(latencies) / len(latencies)) if latencies else 0.0,
+            "max_latency": max(latencies) if latencies else 0.0,
+            "tokens": sum(tokens),
+            "avg_tokens": (sum(tokens) / len(tokens)) if tokens else 0.0,
+            "memory": len(memory_rows),
+            "agents": len(list_agents()),
+            "templates": len(tpls),
             "cost": 0.0,
         },
-        "recent_runs": sorted(summaries, key=lambda row: row.get("started_at") or 0, reverse=True)[:8],
+        "status_counts": [{"status": k, "count": v} for k, v in sorted(statuses.items())],
+        "provider_counts": [{"provider": k, "count": v} for k, v in sorted(providers.items())],
+        "templates": [
+            {"id": t["id"], "name": t["name"], "nodes": len(t.get("nodes") or []), "edges": len(t.get("edges") or [])}
+            for t in tpls
+        ],
+        "score_series": score_series,
+        "token_series": token_series,
+        "latency_series": latency_series,
+        "pass_series": pass_series,
+        "activity": feed[:40],
+        "recent_runs": feed[:20],
         "recent_events": [],
     }
 

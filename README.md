@@ -1,6 +1,10 @@
 # Actuate
 
 <p align="center">
+  <img src="docs/logo.png" alt="Actuate" width="96" />
+</p>
+
+<p align="center">
   <strong>Closed-loop feedback control for AI systems</strong><br/>
   Measure. Correct. Converge. Repeat.
 </p>
@@ -228,9 +232,15 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173).
+Open [http://localhost:5173](http://localhost:5173). **Ctrl/Cmd + K** opens the command palette.
 
-**First loop with no keys:** New Run → provider **Stub (offline)** → required phrase `MUST-INCLUDE` → Start loop. Watch Live Session.
+**Live LLM (required for the product):** Settings → save an NVIDIA / OpenAI / Anthropic / Gemini / Groq / OpenRouter / custom key → **New Run → Multi-agent graph** (default). Pick a lab template (20+ nodes) or a smaller graph. Give the run a name.
+
+**Control loop:** New Run → Control loop. Sensor defaults to LLM judge; min iterations is 3 so a lucky first score does not stop the loop.
+
+**Designer:** Loop Designer → drag specialists, load a lab, click a node for its full system prompt, then Run graph.
+
+Stub plants exist only for tests (`allow_stub`). The console does not offer mock as a default.
 
 **NVIDIA (trial / free-tier NIM):** Settings → NVIDIA NIM → paste `nvapi-…` from [build.nvidia.com](https://build.nvidia.com) → New Run → NVIDIA → pick `meta/llama-3.1-8b-instruct`.
 
@@ -240,21 +250,24 @@ Open [http://localhost:5173](http://localhost:5173).
 
 | Screen | Role |
 |---|---|
-| Dashboard | Operational KPIs over event-sourced runs |
-| New Run | Prompt, provider, model, gain, sensors, actuators, custom URL/key |
-| Live Session | Feedback graph, iteration timeline, diffs, live WebSocket events |
-| Runs | Historical executions |
-| Loop Designer | Closed-loop topology (React Flow) |
-| Models | Provider catalog and configuration state |
-| Plugins | Capability registry (kind, version, author) |
-| Observability | Score, latency, tokens projected from the event log |
+| Dashboard | Dense KPIs, charts, status/provider mix, template sizes, searchable activity |
+| New Run | **Multi-agent graph** (default) or control loop; named runs |
+| Live Session | 5-node loop: plant/sensor/error/controller/actuator I/O |
+| Graph run | 20+ node execution: click a node for prompt, I/O, metrics |
+| Runs | Named loop + graph history with in-place search |
+| Loop Designer | Drag-drop specialists, labs, cursor zoom, pan, minimap |
+| Benchmarks | Cohort stats (mean/median/max) across graphs and loops |
+| Memory | Indexed converged trajectories; search highlights matches |
+| Models | Provider catalog + full agent system prompts |
+| Plugins | Capability registry |
+| Observability | Score, tokens, latency, status mix from activity |
 | Settings | Persist keys + custom bases to Postgres |
 
 ## Models and plants
 
 | Provider | How |
 |---|---|
-| Stub | Offline plant for CI and first-run demos |
+| Stub | Tests only (`allow_stub`). Not a console default |
 | OpenAI, Anthropic, Gemini, Groq, OpenRouter | LiteLLM + env / Settings keys |
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` + `NVIDIA_API_KEY` |
 | Ollama | Local `http://localhost:11434` |
