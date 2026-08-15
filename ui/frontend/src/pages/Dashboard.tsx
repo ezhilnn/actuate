@@ -61,8 +61,36 @@ export default function Dashboard() {
   const [health, setHealth] = useState<Health | null>(null);
   const [q, setQ] = useState("");
   useEffect(() => {
-    api<Dash>("/api/dashboard").then(setData).catch(console.error);
-    api<Health>("/api/health").then(setHealth).catch(console.error);
+    api<Dash>("/api/dashboard").then(setData).catch(() =>
+      setData({
+        kpis: {
+          running: 0,
+          running_loops: 0,
+          running_graphs: 0,
+          loop_count: 0,
+          graph_count: 0,
+          success_rate: 0,
+          average_quality: 0,
+          average_iterations: 0,
+          latency: 0,
+          max_latency: 0,
+          tokens: 0,
+          avg_tokens: 0,
+          memory: 0,
+          agents: 0,
+          templates: 0,
+        },
+        status_counts: [],
+        provider_counts: [],
+        templates: [],
+        score_series: [],
+        token_series: [],
+        latency_series: [],
+        pass_series: [],
+        activity: [],
+      }),
+    );
+    api<Health>("/api/health").then(setHealth).catch(() => undefined);
   }, []);
   const k = data?.kpis;
   const filtered = useMemo(() => {

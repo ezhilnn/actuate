@@ -31,9 +31,13 @@ const links = [
 
 export default function App() {
   const [boot, setBoot] = useState(true);
+  const [liveApi, setLiveApi] = useState(true);
   const loc = useLocation();
   useEffect(() => {
     const t = window.setTimeout(() => setBoot(false), 640);
+    fetch("/api/health")
+      .then((r) => setLiveApi(r.ok))
+      .catch(() => setLiveApi(false));
     return () => window.clearTimeout(t);
   }, []);
   return (
@@ -52,6 +56,9 @@ export default function App() {
             ACTUATE
           </div>
           <p className="side-tag">Closed-loop agent console</p>
+          {!liveApi && (
+            <p className="side-hint">UI preview. Clone the repo to run graphs locally.</p>
+          )}
           <nav className="nav">
             {links.map(([to, label]) => (
               <NavLink key={to} to={to} end={to === "/"} className={({ isActive }) => (isActive ? "active" : "")}>

@@ -264,6 +264,20 @@ examples/        graph_lab, train_loop, swagger_lab
 pytest tests -q
 ```
 
+## Preview the console (Netlify)
+
+Host the UI on [Netlify](https://app.netlify.com) (free). Visitors can look around; clone this repo to run graphs.
+
+1. Push to GitHub.
+2. Netlify → **Add new site → Import from Git**.
+3. Confirm `netlify.toml`:
+
+| Field | Value |
+|---|---|
+| Base directory | `ui/frontend` |
+| Build command | `npm run build` |
+| Publish directory | `ui/frontend/dist` |
+
 ## Contributing
 
 1. `ControlSystem` stays the aggregate root.
