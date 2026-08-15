@@ -11,6 +11,7 @@ from sqlalchemy import Float, Integer, String, Text, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm.attributes import flag_modified
 
 from actuate.domain.control_system import ControlSystem, Workspace
 from actuate.domain.events import Event
@@ -230,14 +231,15 @@ class SqlRunStore:
                         id=run["id"],
                         name=str(run.get("name") or run.get("graph_name") or ""),
                         status=str(run.get("status") or "running"),
-                        payload=run,
+                        payload=dict(run),
                         created_at=time.time(),
                     )
                 )
             else:
-                existing.payload = run
+                existing.payload = dict(run)
                 existing.status = str(run.get("status") or existing.status)
                 existing.name = str(run.get("name") or existing.name)
+                flag_modified(existing, "payload")
             await session.commit()
 
     async def load_graph_run(self, run_id: str) -> dict[str, Any] | None:

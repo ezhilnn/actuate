@@ -7,6 +7,7 @@ A node that fans out to three children publishes once; those children start toge
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import time
 import uuid
@@ -18,6 +19,7 @@ from actuate.graphs.agent import llm_once, run_specialist
 from actuate.graphs.catalog import agent_by_id
 
 LogFn = Callable[[dict[str, Any]], Awaitable[None]]
+ProgressFn = Callable[[list[dict[str, Any]]], Awaitable[None]]
 
 
 class BudgetExceeded(RuntimeError):
@@ -98,16 +100,22 @@ class GraphRunner:
         log: LogFn | None = None,
         memory: Any | None = None,
         max_tokens: int = 250_000,
+        on_progress: ProgressFn | None = None,
     ) -> None:
         self.generator = generator
         self.log = log
         self.memory = memory
+        self.on_progress = on_progress
         self.max_tokens = max(1, int(max_tokens))
         self._tokens_used = 0
 
     async def _emit(self, payload: dict[str, Any]) -> None:
         if self.log:
             await self.log(payload)
+
+    async def _snapshot(self, traces: dict[str, dict[str, Any]]) -> None:
+        if self.on_progress:
+            await self.on_progress(copy.deepcopy(list(traces.values())))
 
     def _charge(self, tokens: int) -> None:
         self._tokens_used += int(tokens or 0)
@@ -228,6 +236,7 @@ class GraphRunner:
                     "fan_out": kids,
                 }
             )
+            await self._snapshot(traces)
 
             tool_trail: list[dict[str, Any]] = []
             score: float | None = None
@@ -271,6 +280,19 @@ class GraphRunner:
                     )
             except BudgetExceeded:
                 raise
+            except Exception as exc:  # noqa: BLE001
+                await self._emit(
+                    {
+                        "kind": "NodeFailed",
+                        "run_id": run_id,
+                        "node_id": nid,
+                        "agent": node["agent"],
+                        "title": title,
+                        "error": str(exc),
+                    }
+                )
+                await self._snapshot(traces)
+                raise
             self._charge(tokens)
 
             traces[nid]["steps"].append(
@@ -305,6 +327,7 @@ class GraphRunner:
                     "delivered_in_parallel_to": kids,
                 }
             )
+            await self._snapshot(traces)
 
         try:
             for pass_index in range(1, max_passes + 1):
@@ -357,6 +380,22 @@ class GraphRunner:
         elif order:
             final = traces[order[-1]]["outputs"][-1] if traces[order[-1]]["outputs"] else ""
 
+        judges = [nid for nid in nodes if agent_by_id(nodes[nid]["agent"])["kind"] == "judge"]
+        last_scores = {
+            nid: traces[nid]["scores"][-1] for nid in judges if traces[nid]["scores"]
+        }
+        if status == "exhausted":
+            scored = ", ".join(f"{_title(nodes[nid]['agent'])}={score:.2f}" for nid, score in last_scores.items()) or "no judge scores"
+            stop_reason = (
+                f"Stopped after {max_passes} graph passes: judges did not reach target {target:.2f} ({scored})."
+            )
+        elif status == "converged":
+            stop_reason = f"All judges reached target {target:.2f}."
+        elif status == "budget_exceeded":
+            stop_reason = f"Token budget {self.max_tokens} exceeded."
+        else:
+            stop_reason = status
+
         result = {
             "id": run_id,
             "graph_id": graph.get("id"),
@@ -365,6 +404,7 @@ class GraphRunner:
             "prompt": prompt,
             "output": final,
             "target_score": target,
+            "max_passes": max_passes,
             "passes": pass_index,
             "latency_seconds": time.monotonic() - started,
             "tokens": sum(t["tokens"] for t in traces.values()),
@@ -374,6 +414,17 @@ class GraphRunner:
             "overrides": overrides,
             "parent_run_id": ctx.get("parent_run_id"),
             "rerun_from": rerun_from,
+            "stop_reason": stop_reason,
+            "judge_scores": last_scores,
         }
-        await self._emit({"kind": "GraphFinished", "run_id": run_id, "status": status, "tokens": result["tokens"]})
+        await self._emit(
+            {
+                "kind": "GraphFinished",
+                "run_id": run_id,
+                "status": status,
+                "tokens": result["tokens"],
+                "stop_reason": stop_reason,
+            }
+        )
+        await self._snapshot(traces)
         return result

@@ -558,6 +558,13 @@ async def start_graph_run(body: GraphRunRequest) -> dict[str, str]:
         STATE.graph_runs[run_id].setdefault("logs", []).append(payload)
         await STATE.hub.publish(run_id, payload)
 
+    async def _progress(traces: list[dict[str, Any]]) -> None:
+        STATE.graph_runs[run_id]["traces"] = traces
+        STATE.graph_runs[run_id]["tokens"] = sum(int(t.get("tokens") or 0) for t in traces)
+        STATE.graph_runs[run_id]["passes"] = max((int(t.get("passes") or 0) for t in traces), default=0)
+        if hasattr(STATE.store, "save_graph_run"):
+            await STATE.store.save_graph_run(STATE.graph_runs[run_id])
+
     async def _go() -> None:
         try:
             prior = None
@@ -568,7 +575,11 @@ async def start_graph_run(body: GraphRunRequest) -> dict[str, str]:
                 if parent:
                     prior = {row["node_id"]: row for row in parent.get("traces") or [] if row.get("node_id")}
             result = await GraphRunner(
-                generator, log=_log, memory=STATE.memory, max_tokens=body.max_tokens
+                generator,
+                log=_log,
+                memory=STATE.memory,
+                max_tokens=body.max_tokens,
+                on_progress=_progress,
             ).run(
                 body.graph,
                 prompt=body.prompt,
@@ -594,6 +605,7 @@ async def start_graph_run(body: GraphRunRequest) -> dict[str, str]:
         except Exception as exc:  # noqa: BLE001
             STATE.graph_runs[run_id]["status"] = "failed"
             STATE.graph_runs[run_id]["output"] = str(exc)
+            STATE.graph_runs[run_id]["stop_reason"] = str(exc)
             if hasattr(STATE.store, "save_graph_run"):
                 await STATE.store.save_graph_run(STATE.graph_runs[run_id])
             await _log({"kind": "GraphFailed", "run_id": run_id, "error": str(exc)})
@@ -628,14 +640,71 @@ async def list_graph_runs() -> dict[str, Any]:
     return {"runs": list(reversed(list(rows)))}
 
 
+def _hydrate_graph_run(row: dict[str, Any]) -> dict[str, Any]:
+    """Fill traces from persisted node logs so historic runs still inspect."""
+    traces: dict[str, dict[str, Any]] = {}
+    for item in row.get("traces") or []:
+        nid = item.get("node_id")
+        if nid:
+            traces[nid] = dict(item)
+            traces[nid].setdefault("inputs", [])
+            traces[nid].setdefault("outputs", [])
+            traces[nid].setdefault("scores", [])
+            traces[nid].setdefault("feedback", [])
+            traces[nid].setdefault("steps", [])
+    for ev in row.get("logs") or []:
+        nid = ev.get("node_id")
+        if not nid:
+            continue
+        slot = traces.setdefault(
+            nid,
+            {
+                "node_id": nid,
+                "agent": ev.get("agent") or "",
+                "title": ev.get("title") or "",
+                "inputs": [],
+                "outputs": [],
+                "scores": [],
+                "feedback": [],
+                "latency_seconds": float(ev.get("latency_seconds") or 0),
+                "tokens": int(ev.get("tokens") or 0),
+                "passes": int(ev.get("pass") or 0),
+                "steps": [],
+            },
+        )
+        if ev.get("agent") and not slot.get("agent"):
+            slot["agent"] = ev["agent"]
+        kind = ev.get("kind")
+        if kind == "NodeStarted" and ev.get("input") and not slot["inputs"]:
+            slot["inputs"] = [ev["input"]]
+        if kind == "NodeCompleted":
+            if ev.get("input"):
+                slot["inputs"] = slot["inputs"] or [ev["input"]]
+            if ev.get("output") and not slot["outputs"]:
+                slot["outputs"] = [ev["output"]]
+            if ev.get("tokens") is not None:
+                slot["tokens"] = max(int(slot.get("tokens") or 0), int(ev.get("tokens") or 0))
+            if ev.get("latency_seconds") is not None:
+                slot["latency_seconds"] = max(
+                    float(slot.get("latency_seconds") or 0), float(ev.get("latency_seconds") or 0)
+                )
+            if ev.get("pass") is not None:
+                slot["passes"] = max(int(slot.get("passes") or 0), int(ev.get("pass") or 0))
+        if kind == "NodeSkipped":
+            slot["frozen"] = True
+    row["traces"] = list(traces.values())
+    row.setdefault("logs", [])
+    return row
+
+
 @app.get("/api/graph-runs/{run_id}")
 async def get_graph_run(run_id: str) -> dict[str, Any]:
     if run_id in STATE.graph_runs:
-        return STATE.graph_runs[run_id]
+        return _hydrate_graph_run(dict(STATE.graph_runs[run_id]))
     loaded = await STATE.store.load_graph_run(run_id) if hasattr(STATE.store, "load_graph_run") else None
     if not loaded:
         raise HTTPException(404, "unknown graph run")
-    return loaded
+    return _hydrate_graph_run(dict(loaded))
 
 
 def _diff_text(left: str, right: str) -> list[dict[str, str]]:
@@ -653,12 +722,13 @@ def _diff_text(left: str, right: str) -> list[dict[str, str]]:
 
 async def _any_run(run_id: str) -> dict[str, Any]:
     if run_id in STATE.graph_runs:
-        row = dict(STATE.graph_runs[run_id])
+        row = _hydrate_graph_run(dict(STATE.graph_runs[run_id]))
         row["kind"] = "graph"
         return row
     if hasattr(STATE.store, "load_graph_run"):
         loaded = await STATE.store.load_graph_run(run_id)
         if loaded:
+            loaded = _hydrate_graph_run(dict(loaded))
             loaded["kind"] = "graph"
             return loaded
     try:
