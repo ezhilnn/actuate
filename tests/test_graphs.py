@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from actuate.api.app import _hydrate_graph_run
 from actuate.graphs.runner import GraphRunner, topological_order
 from actuate.graphs.templates import templates
 from actuate.plants import StubGenerator
@@ -91,6 +92,81 @@ async def test_fan_out_runs_children_in_parallel() -> None:
     elapsed = __import__("time").monotonic() - started
     assert result["status"] == "converged"
     assert elapsed < 0.35
+
+
+@pytest.mark.asyncio
+async def test_progress_reports_completed_ingress_before_downstream() -> None:
+    graph = {
+        "id": "live",
+        "max_passes": 1,
+        "target_score": 0.1,
+        "nodes": [
+            {"id": "in", "agent": "ingress"},
+            {"id": "r", "agent": "researcher"},
+            {"id": "out", "agent": "egress"},
+        ],
+        "edges": [{"id": "a", "source": "in", "target": "r"}, {"id": "b", "source": "r", "target": "out"}],
+    }
+    snapshots: list[list[dict]] = []
+
+    async def on_progress(traces: list[dict]) -> None:
+        snapshots.append(traces)
+
+    await GraphRunner(StubGenerator(), on_progress=on_progress).run(graph, prompt="live status")
+    assert snapshots
+    first_complete = next(
+        snap for snap in snapshots if any(t["node_id"] == "in" and t["outputs"] for t in snap)
+    )
+    researcher = next(t for t in first_complete if t["node_id"] == "r")
+    assert researcher["outputs"] == []
+
+
+def test_hydrate_historic_run_from_logs_when_traces_empty() -> None:
+    row = _hydrate_graph_run(
+        {
+            "id": "old",
+            "status": "failed",
+            "traces": [],
+            "logs": [
+                {"kind": "NodeStarted", "node_id": "in", "agent": "ingress", "input": "clinic prompt"},
+                {
+                    "kind": "NodeCompleted",
+                    "node_id": "in",
+                    "agent": "ingress",
+                    "input": "clinic prompt",
+                    "output": "clinic prompt",
+                },
+                {"kind": "NodeStarted", "node_id": "r", "agent": "researcher", "input": "clinic prompt"},
+            ],
+        }
+    )
+    by_id = {t["node_id"]: t for t in row["traces"]}
+    assert by_id["in"]["outputs"] == ["clinic prompt"]
+    assert by_id["r"]["inputs"] == ["clinic prompt"]
+    assert by_id["r"]["outputs"] == []
+
+
+@pytest.mark.asyncio
+async def test_low_judge_score_exhausts() -> None:
+    class LowJudge:
+        async def generate(self, prompt: str, *, context: dict) -> str:
+            return json.dumps({"score": 0.65, "feedback": "need a clearer decision question", "passed": False})
+
+    graph = {
+        "id": "ex",
+        "max_passes": 2,
+        "target_score": 0.85,
+        "nodes": [
+            {"id": "in", "agent": "ingress"},
+            {"id": "j", "agent": "judge_accuracy"},
+            {"id": "out", "agent": "egress"},
+        ],
+        "edges": [{"id": "a", "source": "in", "target": "j"}, {"id": "b", "source": "j", "target": "out"}],
+    }
+    result = await GraphRunner(LowJudge()).run(graph, prompt="memo")
+    assert result["status"] == "exhausted"
+    assert "0.85" in result["stop_reason"]
+    assert result["passes"] == 2
 
 
 @pytest.mark.asyncio

@@ -11,21 +11,21 @@ const LABEL: Record<string, string> = {
 };
 
 export default function AgentFlowNode({ data, selected }: NodeProps) {
-  const status = String(data.status || "ready");
-  const showPill = Boolean(LABEL[status]);
+  const status = data.status ? String(data.status) : "";
+  const showRun = Boolean(status && LABEL[status]);
   return (
     <div
-      className={`agent-node ${data.kind} ${selected ? "sel" : ""} ${status}`}
+      className={`agent-node ${data.kind} ${selected ? "sel" : ""} ${showRun ? status : "ready"}`}
       style={{ ["--node-accent" as string]: data.color || "#3d8bfd" }}
     >
       <Handle type="target" position={Position.Left} />
       <div className="agent-node-top">
         <span className="k">{data.kind}</span>
-        {showPill && <span className={`run-pill ${status}`}>{LABEL[status]}</span>}
+        {showRun && <span className={`run-pill ${status}`}>{LABEL[status]}</span>}
       </div>
       <strong>{data.title}</strong>
-      {data.score != null && <em>score {Number(data.score).toFixed(3)}</em>}
-      {status === "completed" && data.tokens != null && <em>{data.tokens} tok</em>}
+      {showRun && data.score != null && <em>score {Number(data.score).toFixed(3)}</em>}
+      {showRun && status === "completed" && data.tokens != null && <em>{data.tokens} tok</em>}
       <Handle type="source" position={Position.Right} />
     </div>
   );
