@@ -39,7 +39,7 @@ class RuleBasedConvergencePolicy:
         if stability.timeout_seconds is not None and elapsed_seconds > stability.timeout_seconds:
             return "timed_out"
 
-        if error.within_tolerance:
+        if error.within_tolerance and iteration_index >= stability.min_iterations:
             return "converged"
 
         scores = [v.error_signal.measured for v in history if v.error_signal is not None]

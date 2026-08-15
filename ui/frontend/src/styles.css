@@ -15,7 +15,7 @@
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
 body {
-  font-family: Inter, system-ui, sans-serif;
+  font-family: Outfit, Inter, system-ui, sans-serif;
   background: var(--bg);
   color: var(--text);
 }
@@ -212,3 +212,48 @@ textarea { min-height: 280px; resize: vertical; }
   border-radius: 8px; padding: 8px; cursor: pointer;
 }
 pre.out { max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 12px; background: #0b0e14; padding: 10px; border-radius: 8px; }
+
+.palette-item.on, .card.clickable.sel { border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue); }
+.card.clickable { cursor: pointer; text-align: left; width: 100%; }
+.guide { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.guide-head { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+.guide-head i { width: 10px; height: 10px; border-radius: 99px; flex-shrink: 0; }
+.guide-head h3 { margin: 0; font-size: 14px; color: var(--text); }
+.guide-p { font-size: 12.5px; color: var(--text); line-height: 1.45; margin: 0 0 10px; }
+.prompt-box {
+  white-space: pre-wrap;
+  font-size: 11.5px;
+  background: #07080c;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  max-height: 180px;
+  overflow: auto;
+  color: #c9d4e8;
+}
+.boot, .boot-full {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  color: var(--muted); font-size: 13px;
+}
+.boot.inline { padding: 24px; }
+.boot-full {
+  position: fixed; inset: 0; z-index: 50;
+  background: radial-gradient(1200px 600px at 20% -10%, #1a2a55 0%, #07080c 55%);
+}
+.boot-full p { margin: 0; font-size: 22px; letter-spacing: 0.2em; color: var(--text); font-weight: 700; }
+.boot-full span { font-size: 12px; color: var(--muted); }
+.boot-orb {
+  width: 18px; height: 18px; border-radius: 99px;
+  background: linear-gradient(135deg, var(--blue), var(--purple));
+  box-shadow: 0 0 24px var(--blue);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: 0.6; }
+}
+.fade-in { animation: fadein 0.35s ease; }
+@keyframes fadein { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+button.loop-node { width: 100%; text-align: left; cursor: pointer; color: inherit; }
+.section-title { margin: 22px 0 10px; font-size: 13px; color: var(--muted); font-weight: 500; }
+.split-guide { display: grid; grid-template-columns: 1.4fr 0.8fr; gap: 12px; align-items: start; }

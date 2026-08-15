@@ -145,15 +145,90 @@ _AGENTS: list[Agent] = [
     {"id": "judge_complete", "kind": "judge", "title": "Judge · completeness", "color": "#f5c542",
      "blurb": "Scores whether the user question is answered.",
      "system": "Score completeness 0.0-1.0. JSON only: {\"score\": float, \"feedback\": str, \"passed\": bool}"},
+    {"id": "data_scientist", "kind": "agent", "title": "Data scientist", "color": "#3d8bfd",
+     "blurb": "Hypothesis, method, metrics, caveats.",
+     "system": "You are a data scientist. State hypothesis, method, metrics, leakage risks, and what the data cannot prove."},
+    {"id": "data_engineer", "kind": "agent", "title": "Data engineer", "color": "#8b96a8",
+     "blurb": "Pipelines, quality, lineage.",
+     "system": "Design data pipelines: sources, quality checks, lineage, failure modes. No fake schemas."},
+    {"id": "statistician", "kind": "agent", "title": "Statistician", "color": "#8b7cff",
+     "blurb": "Uncertainty, tests, effect sizes.",
+     "system": "Statistical review: uncertainty, tests, effect size, confounders. Do not overclaim significance."},
+    {"id": "ml_engineer", "kind": "agent", "title": "ML engineer", "color": "#3d8bfd",
+     "blurb": "Model choice, eval, ops constraints.",
+     "system": "ML engineering: model class, evaluation, monitoring, cost. No invented benchmarks."},
+    {"id": "experimenter", "kind": "agent", "title": "Experiment designer", "color": "#f5c542",
+     "blurb": "A/B tests and stopping rules.",
+     "system": "Design experiments: units, randomization, power, stopping rules, ethics of assignment."},
+    {"id": "qa", "kind": "agent", "title": "QA reviewer", "color": "#3dd68c",
+     "blurb": "Test plan against the claim.",
+     "system": "Write a QA plan: cases, oracles, regressions. Flag untestable claims."},
+    {"id": "product", "kind": "agent", "title": "Product strategist", "color": "#8b7cff",
+     "blurb": "User, value, constraints.",
+     "system": "Product brief: user, job-to-be-done, constraints, non-goals, success metric."},
+    {"id": "writer", "kind": "agent", "title": "Narrative writer", "color": "#3d8bfd",
+     "blurb": "Readable story without new facts.",
+     "system": "Write a clear narrative from upstream facts only. No new claims."},
+    {"id": "economist", "kind": "agent", "title": "Economist", "color": "#f5c542",
+     "blurb": "Incentives, costs, distribution.",
+     "system": "Economic view: incentives, costs, who pays, distributional effects. Label guesses."},
+    {"id": "epidemiologist", "kind": "agent", "title": "Epidemiologist", "color": "#3dd68c",
+     "blurb": "Population risk without diagnosis.",
+     "system": "Epidemiology: population risk, exposure, uncertainty. Not individual diagnosis."},
+    {"id": "librarian", "kind": "agent", "title": "Knowledge librarian", "color": "#8b96a8",
+     "blurb": "What to read next; no fake papers.",
+     "system": "Suggest search queries and source types. Never invent paper titles or DOIs."},
 ]
 
 
 def list_agents() -> list[Agent]:
-    return list(_AGENTS)
+    return [_enrich(item) for item in _AGENTS]
 
 
 def agent_by_id(agent_id: str) -> Agent:
     for item in _AGENTS:
         if item["id"] == agent_id:
-            return item
+            return _enrich(item)
     raise KeyError(f"Unknown agent '{agent_id}'")
+
+
+def _enrich(item: Agent) -> Agent:
+    kind = str(item["kind"])
+    ident = str(item["id"])
+    if ident == "ingress":
+        how_to = (
+            "Put this on the left of the graph. Type the user prompt in Run settings. "
+            "Draw edges from User input to every specialist that should see the original question."
+        )
+        receives = "The prompt you type before clicking Run graph."
+        produces = "That same prompt, unchanged, to every connected child."
+    elif ident == "egress":
+        how_to = (
+            "Put this last. Connect judges (or the final writer) into it. "
+            "The published answer is whatever arrives here after judges pass."
+        )
+        receives = "The last approved draft from parent nodes."
+        produces = "The final output shown to the user."
+    elif kind == "judge":
+        how_to = (
+            "Connect this after the draft you want scored. Set Target score in Run settings. "
+            "If the judge is below target, parent agents receive feedback and the graph retries. "
+            "Connect the judge into Final output so a weak draft cannot publish."
+        )
+        receives = "The candidate text from parent nodes, plus the original user goal."
+        produces = "A JSON score (0–1), written feedback, and pass/fail. Also stored as node metrics."
+    else:
+        how_to = (
+            f"Drag “{item['title']}” onto the canvas. Connect User input or other agents into it. "
+            "Connect its output to a synthesizer, editor, or a judge. "
+            f"It only does this job: {item['blurb']} "
+            "It never sees the whole graph — only what you wire into it."
+        )
+        receives = "Every parent node’s latest output (joined). Optional judge feedback on retry passes."
+        produces = "A specialist response written under the system prompt below."
+    return {
+        **item,
+        "how_to": how_to,
+        "receives": receives,
+        "produces": produces,
+    }
