@@ -5,6 +5,7 @@ import "reactflow/dist/style.css";
 import { api } from "../api";
 import { MetricChart, ScoreChart } from "../charts";
 import AgentFlowNode from "../graph/AgentFlowNode";
+import AgentGuide, { Agent } from "../graph/AgentGuide";
 
 const nodeTypes = { agent: AgentFlowNode };
 
@@ -18,6 +19,7 @@ type Trace = {
   latency_seconds: number;
   tokens: number;
   passes: number;
+  steps?: { pass: number; input: string; output: string; score: number | null; feedback: string | null; latency_seconds: number; tokens: number }[];
 };
 
 type GraphRun = {
@@ -35,6 +37,7 @@ type GraphRun = {
   plant?: string;
   provider?: string;
   model?: string;
+  name?: string;
   tokens?: number;
   latency_seconds?: number;
   passes?: number;
@@ -50,8 +53,13 @@ function GraphRunInner() {
   const { runId } = useParams();
   const [run, setRun] = useState<GraphRun | null>(null);
   const [pick, setPick] = useState<string | null>(null);
+  const [agents, setAgents] = useState<Agent[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [tab, setTab] = useState(0);
+
+  useEffect(() => {
+    api<{ agents: Agent[] }>("/api/agents").then((d) => setAgents(d.agents)).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     if (!runId) return;
@@ -107,6 +115,8 @@ function GraphRunInner() {
   );
 
   const picked = pick ? traces[pick] : undefined;
+  const graphNode = run?.graph?.nodes.find((n) => n.id === pick);
+  const pickedAgent = agents.find((a) => a.id === (picked?.agent || graphNode?.agent));
   const scoreChart = (run?.traces || [])
     .filter((t) => t.scores.length)
     .map((t, i) => ({ iteration: i + 1, score: t.scores[t.scores.length - 1] }));
@@ -114,7 +124,7 @@ function GraphRunInner() {
 
   return (
     <>
-      <h1>{run?.graph?.name || "Graph run"}</h1>
+      <h1>{run?.name || run?.graph?.name || "Graph run"}</h1>
       <div className="chips">
         <span className={`chip ${run?.plant === "stub" ? "bad" : "ok"}`}>
           {run?.plant === "stub" ? "MOCK" : `LIVE LLM · ${run?.provider || ""}`}
@@ -147,32 +157,53 @@ function GraphRunInner() {
           <ScoreChart data={scoreChart} />
           <MetricChart data={tokenChart} dataKey="tokens" />
           <h3>Node inspector</h3>
-          <p className="sub">Click a node after (or during) the run to see every input and output pass.</p>
-          {!picked && <p className="sub">No node selected.</p>}
+          <p className="sub">Click a node to see its role, system prompt, and every input/output with metrics.</p>
+          <AgentGuide agent={pickedAgent || (picked ? { id: picked.agent, kind: "agent", title: picked.agent, color: "#3d8bfd", blurb: "" } : null)} />
+          {!picked && <p className="sub">No run data on this node yet.</p>}
           {picked && (
             <>
               <div className="chips">
                 <span className="chip">{picked.agent}</span>
                 <span className="chip">{picked.tokens} tok</span>
                 <span className="chip">{picked.latency_seconds.toFixed(2)}s</span>
+                <span className="chip">{picked.passes} passes</span>
+                {picked.scores.length > 0 && (
+                  <span className="chip">score {picked.scores[picked.scores.length - 1].toFixed(3)}</span>
+                )}
               </div>
               <div className="tabs">
-                {picked.outputs.map((_, i) => (
+                {(picked.steps?.length ? picked.steps : picked.outputs).map((_, i) => (
                   <button key={i} className={tab === i ? "on" : ""} onClick={() => setTab(i)}>
                     pass {i + 1}
                   </button>
                 ))}
               </div>
-              <p className="sub">Input {tab + 1} of {picked.inputs.length}</p>
-              <pre>{picked.inputs[tab] || picked.inputs[picked.inputs.length - 1]}</pre>
-              <p className="sub">Output {tab + 1} of {picked.outputs.length}</p>
-              <pre>{picked.outputs[tab]}</pre>
-              {picked.feedback[tab] && (
-                <>
-                  <p className="sub">Judge feedback</p>
-                  <pre>{picked.feedback[tab]}</pre>
-                </>
-              )}
+              {(() => {
+                const step = picked.steps?.[tab];
+                const input = step?.input || picked.inputs[tab] || picked.inputs[picked.inputs.length - 1];
+                const output = step?.output || picked.outputs[tab];
+                return (
+                  <>
+                    {step && (
+                      <div className="chips">
+                        <span className="chip">{step.tokens} tok this pass</span>
+                        <span className="chip">{step.latency_seconds.toFixed(2)}s this pass</span>
+                        {step.score != null && <span className="chip">score {step.score.toFixed(3)}</span>}
+                      </div>
+                    )}
+                    <p className="sub">Input</p>
+                    <pre>{input}</pre>
+                    <p className="sub">Output</p>
+                    <pre>{output}</pre>
+                    {(step?.feedback || picked.feedback[tab]) && (
+                      <>
+                        <p className="sub">Judge feedback</p>
+                        <pre>{step?.feedback || picked.feedback[tab]}</pre>
+                      </>
+                    )}
+                  </>
+                );
+              })()}
             </>
           )}
           <h3>Log</h3>
