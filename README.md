@@ -22,6 +22,7 @@
   <a href="#why-actuate">Why</a> ·
   <a href="#the-idea">Idea</a> ·
   <a href="#architecture">Architecture</a> ·
+  <a href="#library-vs-console">Package</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#control-console">Console</a> ·
   <a href="#star-fork-clone">Star / Fork / Clone</a>
@@ -129,11 +130,55 @@ Workspace
                     └── Iteration  # projection: one pass around the feedback path
 ```
 
-A **graph** is how topology is represented (NetworkX + port-typed edges). It is not the aggregate root.
+A **graph** is how topology is represented (NetworkX + port-typed edges), and how the console runs multi-agent labs. It is not the aggregate root.
+
+## Library vs console
+
+Actuate is **both**:
+
+| | What it is |
+|---|---|
+| **Python package** `actuate` | Install with `pip install -e ".[plants,persistence,ui]"`. Import `ExecutionEngine`, `GraphRunner`, plants, sensors, stores. This is how you embed Actuate in another service or script. |
+| **Control console** | FastAPI + React. The operator UI (`python -m actuate.api` + `ui/frontend`). Same package, optional extras. |
+
+Entry points: `actuate` (API server), `actuate-bootstrap` (seed Postgres).
+
+Example (library — closed loop):
+
+```python
+import asyncio
+from actuate.domain.policy import LoopPolicy, SetPoint, StabilityGuard
+from actuate.domain.specification import create_specification
+from actuate.domain.templates import standard_closed_loop
+from actuate.engine import ExecutionEngine
+from actuate.plugins import register_builtins
+
+async def main() -> None:
+    spec = create_specification(
+        control_system_id="demo",
+        version_number=1,
+        topology=standard_closed_loop(
+            plant_name="stub",
+            sensor_name="rule",
+            sensor_params={"required_phrases": ["MUST-INCLUDE"]},
+        ),
+        policies=LoopPolicy(set_point=SetPoint(target=0.95), stability=StabilityGuard(max_iterations=6)),
+    )
+    run = await ExecutionEngine().run(
+        spec, registry=register_builtins(), initial_prompt="Write a short answer."
+    )
+    print(run.id, run)
+
+asyncio.run(main())
+```
+
+Graph labs from code: see [`examples/graph_lab.py`](examples/graph_lab.py). Closed loop: [`examples/closed_loop.py`](examples/closed_loop.py).
+
+**How another app passes an LLM:** you do not run chat-completions yourself. You pass `model`, `api_key`, and optional `api_base` into the **plant**. Actuate calls the provider. Details: [`docs/architecture/architecture.md`](docs/architecture/architecture.md#how-another-python-app-uses-actuate).
 
 ## Architecture
 
-Full frozen design: [`docs/architecture/FROZEN_ARCHITECTURE.md`](docs/architecture/FROZEN_ARCHITECTURE.md)
+Frozen constraints + **what is implemented now**: [`docs/architecture/architecture.md`](docs/architecture/architecture.md) (see *Implemented architecture (current)* at the top).
 
 | Layer | Responsibility | Not responsible for |
 |---|---|---|
@@ -167,10 +212,12 @@ actuate/
   telemetry/       Tracing / persistence / MLflow event sinks
   dsl/             YAML → Specification
   plugins/         Built-in capability registration
-  api/             FastAPI + WebSocket control plane
+  graphs/          Specialist catalog, long prompts, DAG runner, agent tools
+                   (web_search, http_get, memory, calculator)
+  api/             FastAPI + WebSocket control plane + console auth
 ui/frontend/       React control console (Vite)
-docs/architecture/ Frozen architecture
-tests/             Engine, codec, API, bootstrap
+docs/architecture/ architecture.md
+tests/             Engine, graphs, tools, API, bootstrap
 docker-compose.yml Postgres 16
 ```
 
@@ -234,7 +281,13 @@ npm run dev
 
 Open [http://localhost:5173](http://localhost:5173). **Ctrl/Cmd + K** opens the command palette.
 
-**Live LLM (required for the product):** Settings → save an NVIDIA / OpenAI / Anthropic / Gemini / Groq / OpenRouter / custom key → **New Run → Multi-agent graph** (default). Pick a lab template (20+ nodes) or a smaller graph. Give the run a name.
+Console API auth is **on by default** (`ACTUATE_AUTH=1`). From the same machine the UI reads the token from `/api/health`. Set `ACTUATE_AUTH=0` only for a locked-down local smoke test. Set `ACTUATE_API_TOKEN` to pin the secret.
+
+**Live LLM (required for the product):** Settings → save an NVIDIA / OpenAI / Anthropic / Gemini / Groq / OpenRouter / custom key → **New Run → Multi-agent graph** (default). Pick a lab template (20+ nodes) or a smaller graph. Give the run a name. Set a **token budget** — the graph hard-stops if it exceeds it.
+
+**Rerun:** open a graph run, click a node, edit its input, **Rerun from this node**. Ancestors are frozen; that node and everything downstream re-execute as a new named revision.
+
+**Export / compare:** Graph run → Export pack (JSON). Benchmarks → pick two named runs.
 
 **Control loop:** New Run → Control loop. Sensor defaults to LLM judge; min iterations is 3 so a lucky first score does not stop the loop.
 
@@ -252,16 +305,34 @@ Stub plants exist only for tests (`allow_stub`). The console does not offer mock
 |---|---|
 | Dashboard | Dense KPIs, charts, status/provider mix, template sizes, searchable activity |
 | New Run | **Multi-agent graph** (default) or control loop; named runs |
-| Live Session | 5-node loop: plant/sensor/error/controller/actuator I/O |
-| Graph run | 20+ node execution: click a node for prompt, I/O, metrics |
+| Live Session | Loop I/O; selected iteration opens as the detail panel |
+| Graph run | Tools + I/O logs; rerun a node as a revision; export JSON pack |
 | Runs | Named loop + graph history with in-place search |
 | Loop Designer | Drag-drop specialists, labs, cursor zoom, pan, minimap |
-| Benchmarks | Cohort stats (mean/median/max) across graphs and loops |
-| Memory | Indexed converged trajectories; search highlights matches |
+| Benchmarks | Cohort stats plus compare two named runs |
+| Memory | Trajectories in Postgres when `DATABASE_URL` is set |
 | Models | Provider catalog + full agent system prompts |
 | Plugins | Capability registry |
 | Observability | Score, tokens, latency, status mix from activity |
 | Settings | Persist keys + custom bases to Postgres |
+
+## Actuate vs LangGraph
+
+LangGraph is a **workflow runtime**: you declare a graph of LLM/tool nodes, it executes that graph, and the graph *is* the application.
+
+Actuate is a **control system** with an optional graph *inside* a versioned specification:
+
+| | LangGraph | Actuate |
+|---|---|---|
+| Product identity | The graph / state machine | `ControlSystem` → `Specification` → event-sourced `Run` |
+| LLM role | A node among nodes | A **plant** (and, on graphs, a specialist that may call tools) |
+| Stopping | Graph reaches an end node | Convergence, exhaustion, oscillation, timeout, or **token budget** |
+| Quality | Whatever you code | Measured **sensor** / **judge** scores vs a setpoint |
+| Memory | Checkpoint / thread state | Retrieval of successful trajectories (Postgres-backed) |
+| Parallelism | Fan-out if you model it | Ready nodes with no unfinished parents run together; one output fans out to all children at once |
+| Audit | Traces if you add them | Append-only events + exportable run pack |
+
+Use LangGraph if you want LangChain’s graph SDK. Use Actuate if you want **measure → correct → converge** around generation, with a console that treats named runs as operations.
 
 ## Models and plants
 
@@ -286,34 +357,23 @@ Inserted on first start if missing:
 | `cs_json_refiner` | JSON rule-sensor loop |
 | `nvidia_base` | `https://integrate.api.nvidia.com/v1` (URL only, no secret) |
 
-## Example (library)
+## Tokens
 
-```python
-import asyncio
-from actuate.domain.policy import LoopPolicy, SetPoint, StabilityGuard
-from actuate.domain.specification import create_specification
-from actuate.domain.templates import standard_closed_loop
-from actuate.engine import ExecutionEngine
-from actuate.plugins import register_builtins
+Live LLM calls take `prompt_tokens` + `completion_tokens` from the provider via LiteLLM (`response.usage`). If the endpoint returns zeros (some NIM models do), Actuate falls back to `len(text) // 4` so budgets still move. Graph run totals **sum every specialist and judge call** (including tool rounds). Loop run totals sum each iteration’s plant `OutputSignal.usage`. Stub tests use the same `// 4` heuristic. This is **not** a billing-grade tokenizer.
 
-async def main() -> None:
-    spec = create_specification(
-        control_system_id="demo",
-        version_number=1,
-        topology=standard_closed_loop(
-            plant_name="stub",
-            sensor_name="rule",
-            sensor_params={"required_phrases": ["MUST-INCLUDE"]},
-        ),
-        policies=LoopPolicy(set_point=SetPoint(target=0.95), stability=StabilityGuard(max_iterations=6)),
-    )
-    run = await ExecutionEngine().run(
-        spec, registry=register_builtins(), initial_prompt="Write a short answer."
-    )
-    print(run.id)
+## Agent tools
 
-asyncio.run(main())
-```
+Graph specialists may emit `{"tool": "name", "args": {...}}` then write the deliverable:
+
+| Tool | What it does |
+|---|---|
+| `web_search` | DuckDuckGo instant-answer search |
+| `http_get` | GET a public **https** URL (private/loopback/metadata blocked, ~80KB cap) |
+| `recall_memory` | Similar past converged trajectories |
+| `calculator` | Arithmetic |
+| `utc_now` | UTC timestamp |
+| `list_connections` | This node’s parents/children |
+| `handoff` | Structured packet for downstream nodes |
 
 ## Tests
 

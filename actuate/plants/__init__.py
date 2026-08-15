@@ -105,6 +105,9 @@ class LiteLLMAdapter:
         usage = getattr(response, "usage", None)
         prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
         completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        if prompt_tokens == 0 and completion_tokens == 0:
+            prompt_tokens = max(1, len(prompt) // 4)
+            completion_tokens = max(1, len(choice) // 4)
         return GenerationOutcome(
             text=choice,
             latency_seconds=time.monotonic() - start,

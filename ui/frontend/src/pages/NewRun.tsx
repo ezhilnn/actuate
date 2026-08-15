@@ -39,6 +39,7 @@ export default function NewRun() {
   const [apiKey, setApiKey] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [maxTokens, setMaxTokens] = useState(250000);
 
   useEffect(() => {
     Promise.all([
@@ -79,6 +80,7 @@ export default function NewRun() {
             temperature,
             api_base: apiBase || undefined,
             api_key: apiKey || undefined,
+            max_tokens: maxTokens,
           }),
         });
         nav(`/graph/${created.run_id}`);
@@ -208,6 +210,8 @@ export default function NewRun() {
               <input value={phrases} onChange={(e) => setPhrases(e.target.value)} />
             </>
           )}
+          <label>Token budget (hard stop)</label>
+          <input type="number" min={2000} value={maxTokens} onChange={(e) => setMaxTokens(Number(e.target.value))} />
           <button className="primary btn-press" type="submit">{mode === "graph" ? "Run graph" : "Start loop"}</button>
         </div>
       </form>

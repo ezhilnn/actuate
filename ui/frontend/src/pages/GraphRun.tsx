@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import ReactFlow, { Background, Controls, Edge, MiniMap, Node, ReactFlowProvider } from "reactflow";
 import "reactflow/dist/style.css";
-import { api } from "../api";
+import { api, getToken } from "../api";
 import { MetricChart, ScoreChart } from "../charts";
 import AgentFlowNode from "../graph/AgentFlowNode";
 import AgentGuide, { Agent } from "../graph/AgentGuide";
@@ -14,6 +14,8 @@ const nodeTypes = { agent: AgentFlowNode };
 type Trace = {
   node_id: string;
   agent: string;
+  title?: string;
+  frozen?: boolean;
   inputs: string[];
   outputs: string[];
   scores: number[];
@@ -37,6 +39,9 @@ type GraphRun = {
     edges: { id: string; source: string; target: string }[];
   };
   plant?: string;
+  parent_run_id?: string;
+  rerun_from?: string;
+  max_tokens?: number;
   provider?: string;
   model?: string;
   name?: string;
@@ -47,17 +52,37 @@ type GraphRun = {
 
 function wsUrl(runId: string): string {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  if (import.meta.env.DEV) return `${proto}://127.0.0.1:8000/ws/runs/${runId}`;
-  return `${proto}://${location.host}/ws/runs/${runId}`;
+  const token = getToken();
+  const q = token ? `?token=${encodeURIComponent(token)}` : "";
+  if (import.meta.env.DEV) return `${proto}://127.0.0.1:8000/ws/runs/${runId}${q}`;
+  return `${proto}://${location.host}/ws/runs/${runId}${q}`;
+}
+
+function formatLog(msg: Record<string, unknown>): string {
+  const kind = String(msg.kind || "");
+  const title = String(msg.title || msg.agent || msg.node_id || "");
+  if (kind === "NodeStarted") {
+    return `▶ ${title} started\n  input: ${String(msg.input || "").slice(0, 500)}`;
+  }
+  if (kind === "NodeCompleted") {
+    const kids = Array.isArray(msg.delivered_in_parallel_to) ? msg.delivered_in_parallel_to.join(", ") : "";
+    return `✓ ${title} completed · ${msg.tokens || 0} tok · ${msg.latency_seconds || 0}s${kids ? `\n  fan-out → ${kids}` : ""}\n  input: ${String(msg.input || "").slice(0, 400)}\n  output: ${String(msg.output || "").slice(0, 400)}`;
+  }
+  if (kind === "NodeSkipped") return `⏭ ${title} frozen (${msg.reason})`;
+  if (kind === "BudgetExceeded") return `✗ token budget ${msg.tokens} > ${msg.cap}`;
+  return `${kind} ${title} ${msg.status || ""}`.trim();
 }
 
 function GraphRunInner() {
   const { runId } = useParams();
+  const nav = useNavigate();
   const [run, setRun] = useState<GraphRun | null>(null);
   const [pick, setPick] = useState<string | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [tab, setTab] = useState(0);
+  const [draft, setDraft] = useState("");
+  const [maxTok, setMaxTok] = useState(250000);
   const toast = useToast();
   const lastStatus = useRef<string | null>(null);
 
@@ -71,6 +96,7 @@ function GraphRunInner() {
     const tick = async () => {
       const data = await api<GraphRun>(`/api/graph-runs/${runId}`);
       setRun(data);
+      if (data.max_tokens) setMaxTok(data.max_tokens);
       if (lastStatus.current && lastStatus.current === "running" && data.status !== "running") {
         const n = (data.traces || []).length;
         toast(
@@ -85,7 +111,7 @@ function GraphRunInner() {
     const ws = new WebSocket(wsUrl(runId));
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
-      setLogs((prev) => [`${msg.kind} ${msg.node_id || msg.status || ""}`.trim(), ...prev].slice(0, 200));
+      setLogs((prev) => [formatLog(msg), ...prev].slice(0, 80));
     };
     return () => {
       window.clearTimeout(timer);
@@ -100,17 +126,26 @@ function GraphRunInner() {
   }, [run]);
 
   const nodes: Node[] = useMemo(() => {
-    const started = new Set((run?.logs || []).filter((l) => l.kind === "NodeStarted").map((l) => (l as { node_id?: string }).node_id));
+    const started = new Set(
+      (run?.logs || []).filter((l) => l.kind === "NodeStarted").map((l) => (l as { node_id?: string }).node_id),
+    );
+    const skipped = new Set(
+      (run?.logs || []).filter((l) => l.kind === "NodeSkipped").map((l) => (l as { node_id?: string }).node_id),
+    );
     return (run?.graph?.nodes || []).map((n) => {
       const t = traces[n.id];
       const lastScore = t?.scores[t.scores.length - 1];
-      let status = "idle";
-      if (run?.status === "running") {
-        if (t?.outputs.length) status = "completed";
-        else if (started.has(n.id) || t?.inputs.length) status = "running";
+      const ran = Boolean(t?.outputs?.length);
+      let status = "waiting";
+      if (skipped.has(n.id) || t?.frozen) status = "skipped";
+      else if (run?.status === "running") {
+        if (ran) status = "completed";
+        else if (started.has(n.id) || (t?.inputs?.length && !ran)) status = "running";
         else status = "queued";
-      } else if (t?.outputs.length) {
+      } else if (ran) {
         status = lastScore != null && lastScore < 0.8 ? "failed" : "completed";
+      } else {
+        status = "waiting";
       }
       return {
         id: n.id,
@@ -120,8 +155,9 @@ function GraphRunInner() {
           agent: n.agent,
           title: n.label || n.agent,
           kind: n.agent.startsWith("judge") ? "judge" : n.agent === "ingress" || n.agent === "egress" ? "io" : "agent",
-          color: lastScore != null && lastScore < 0.8 ? "#ff6b7a" : "#3d8bfd",
+          color: status === "failed" ? "#ff6b7a" : status === "completed" ? "#3dd68c" : "#3d8bfd",
           score: lastScore,
+          tokens: t?.tokens,
           passes: t?.passes,
           status,
         },
@@ -129,32 +165,39 @@ function GraphRunInner() {
     });
   }, [run, traces]);
 
+  const doneIds = useMemo(
+    () => new Set(nodes.filter((n) => n.data.status === "completed" || n.data.status === "skipped").map((n) => n.id)),
+    [nodes],
+  );
+  const waitingCount = nodes.filter((n) => n.data.status === "waiting" || n.data.status === "queued").length;
+  const ranCount = nodes.filter((n) => n.data.status === "completed" || n.data.status === "skipped").length;
+  const runningCount = nodes.filter((n) => n.data.status === "running").length;
+
   const edges: Edge[] = useMemo(() => {
-    const hot = new Set(
-      (run?.graph?.nodes || [])
-        .filter((n) => {
-          const t = traces[n.id];
-          return run?.status === "running" && t && t.inputs.length && !t.outputs.length;
-        })
-        .map((n) => n.id),
-    );
-    if (pick) {
-      hot.add(pick);
-    }
     return (run?.graph?.edges || []).map((e) => {
-      const live = hot.has(e.source) || hot.has(e.target);
+      const srcDone = doneIds.has(e.source);
+      const tgtRun = nodes.find((n) => n.id === e.target)?.data.status;
+      const live = tgtRun === "running" || (run?.status === "running" && srcDone && tgtRun === "queued");
       const selectedPath = Boolean(pick && (e.source === pick || e.target === pick));
+      let className = "edge-wait";
+      if (selectedPath) className = "edge-live";
+      else if (live) className = "edge-flow";
+      else if (srcDone) className = "edge-done";
       return {
         id: e.id,
         source: e.source,
         target: e.target,
         type: "smoothstep",
         animated: live,
-        className: selectedPath ? "edge-live" : live ? "edge-flow" : "",
-        style: selectedPath ? { stroke: "#3d8bfd", strokeWidth: 2 } : undefined,
+        className,
+        style: selectedPath
+          ? { stroke: "#3d8bfd", strokeWidth: 2 }
+          : srcDone && !live
+            ? { stroke: "#2e6b50", strokeWidth: 1.4 }
+            : { stroke: "#2a3140", strokeWidth: 1, opacity: 0.55 },
       };
     });
-  }, [run, traces, pick]);
+  }, [run, nodes, doneIds, pick]);
 
   const picked = pick ? traces[pick] : undefined;
   const graphNode = run?.graph?.nodes.find((n) => n.id === pick);
@@ -174,16 +217,45 @@ function GraphRunInner() {
         <span className="chip"><StatusChip status={run?.status} /></span>
         <span className="chip">{run?.passes ?? 0} passes</span>
         <span className="chip">{(run?.latency_seconds ?? 0).toFixed(2)}s</span>
-        <span className="chip">{run?.tokens ?? 0} tok</span>
+        <span className="chip">{run?.tokens ?? 0} / {run?.max_tokens ?? maxTok} tok</span>
+        <span className="chip">{ranCount} ran</span>
+        <span className="chip">{runningCount ? `${runningCount} running` : `${waitingCount} not run`}</span>
         <Link className="chip" to="/designer">Edit graph</Link>
+        <button
+          type="button"
+          className="chip btn-press"
+          onClick={async () => {
+            if (!runId) return;
+            const pack = await api<unknown>(`/api/graph-runs/${runId}/pack`);
+            const blob = new Blob([JSON.stringify(pack, null, 2)], { type: "application/json" });
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = `${run?.name || "run"}-pack.json`;
+            a.click();
+          }}
+        >
+          Export pack
+        </button>
       </div>
       <div className="designer-shell run">
-        <div className="rf canvas">
+        <div className="rf canvas graph-run-canvas">
+          <div className="graph-legend" aria-hidden>
+            <span><i className="lg waiting" /> not run</span>
+            <span><i className="lg queued" /> waiting</span>
+            <span><i className="lg running" /> running</span>
+            <span><i className="lg completed" /> ran</span>
+            <span><i className="lg skipped" /> frozen</span>
+            <span><i className="lg failed" /> failed</span>
+          </div>
           <ReactFlow
             nodes={nodes}
             edges={edges}
             nodeTypes={nodeTypes}
-            onNodeClick={(_, n) => setPick(n.id)}
+            onNodeClick={(_, n) => {
+              setPick(n.id);
+              const t = traces[n.id];
+              setDraft(t?.inputs[t.inputs.length - 1] || "");
+            }}
             fitView
             minZoom={0.15}
             maxZoom={1.75}
@@ -193,7 +265,17 @@ function GraphRunInner() {
           >
             <Background />
             <Controls />
-            <MiniMap />
+            <MiniMap
+              nodeColor={(n) => {
+                const s = String(n.data?.status || "");
+                if (s === "completed") return "#3dd68c";
+                if (s === "failed") return "#ff6b7a";
+                if (s === "running") return "#3d8bfd";
+                if (s === "skipped") return "#8b9cb3";
+                if (s === "queued") return "#c9b36a";
+                return "#2a3140";
+              }}
+            />
           </ReactFlow>
         </div>
         <aside className="inspector">
@@ -237,7 +319,37 @@ function GraphRunInner() {
                         {step.score != null && <span className="chip">score {step.score.toFixed(3)}</span>}
                       </div>
                     )}
-                    <p className="sub">Input</p>
+                    <p className="sub">Input (edit to rerun this node + descendants as a new revision)</p>
+                    <textarea value={draft} onChange={(e) => setDraft(e.target.value)} style={{ minHeight: 100 }} />
+                    <label>Token budget</label>
+                    <input type="number" min={1000} value={maxTok} onChange={(e) => setMaxTok(Number(e.target.value))} />
+                    <button
+                      type="button"
+                      className="primary btn-press"
+                      disabled={run?.status === "running"}
+                      onClick={async () => {
+                        if (!run || !pick) return;
+                        const created = await api<{ run_id: string }>("/api/graphs/run", {
+                          method: "POST",
+                          body: JSON.stringify({
+                            prompt: run.prompt,
+                            name: `${run.name || "Graph"} · rerun ${pickedAgent?.title || pick}`,
+                            graph: run.graph,
+                            provider: run.provider || "nvidia",
+                            model: run.model,
+                            parent_run_id: run.id,
+                            rerun_from: pick,
+                            node_overrides: { [pick]: draft },
+                            max_tokens: maxTok,
+                          }),
+                        });
+                        toast("Revision started", "Frozen ancestors · this node and downstream re-run in parallel");
+                        nav(`/graph/${created.run_id}`);
+                      }}
+                    >
+                      Rerun from this node
+                    </button>
+                    <p className="sub">Input snapshot</p>
                     <pre>{input}</pre>
                     <p className="sub">Output</p>
                     <pre>{output}</pre>
