@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable
 from actuate.domain.protocols import Generator
 from actuate.graphs.agent import llm_once, run_specialist
 from actuate.graphs.catalog import agent_by_id
+from actuate.graphs.builder import as_graph_dict
 
 LogFn = Callable[[dict[str, Any]], Awaitable[None]]
 ProgressFn = Callable[[list[dict[str, Any]]], Awaitable[None]]
@@ -92,6 +93,27 @@ def _title(agent_id: str) -> str:
         return agent_id
 
 
+def _spec_for_node(node: dict[str, Any]) -> dict[str, Any]:
+    try:
+        spec = dict(agent_by_id(node["agent"]))
+    except KeyError:
+        spec = {
+            "id": node.get("agent"),
+            "kind": node.get("kind") or "agent",
+            "title": node.get("label") or node.get("agent"),
+            "system": "",
+            "color": "#3d8bfd",
+            "blurb": "Custom agent",
+        }
+    if node.get("system"):
+        spec["system"] = str(node["system"])
+    if node.get("kind"):
+        spec["kind"] = str(node["kind"])
+    if node.get("label"):
+        spec["title"] = str(node["label"])
+    return spec
+
+
 class GraphRunner:
     def __init__(
         self,
@@ -124,7 +146,7 @@ class GraphRunner:
 
     async def run(
         self,
-        graph: dict[str, Any],
+        graph: dict[str, Any] | Any,
         *,
         prompt: str,
         context: dict[str, Any] | None = None,
@@ -133,6 +155,7 @@ class GraphRunner:
         prior_traces: dict[str, dict[str, Any]] | None = None,
         rerun_from: str | None = None,
     ) -> dict[str, Any]:
+        graph = as_graph_dict(graph)
         run_id = run_id or uuid.uuid4().hex
         nodes = {n["id"]: n for n in graph["nodes"]}
         edges = list(graph.get("edges") or [])
@@ -204,8 +227,8 @@ class GraphRunner:
 
         async def execute(nid: str, pass_index: int) -> None:
             node = nodes[nid]
-            spec = agent_by_id(node["agent"])
-            title = _title(node["agent"])
+            spec = _spec_for_node(node)
+            title = str(spec.get("title") or _title(node["agent"]))
             if nid in freeze and traces[nid]["outputs"]:
                 await self._emit(
                     {
@@ -416,6 +439,12 @@ class GraphRunner:
             "rerun_from": rerun_from,
             "stop_reason": stop_reason,
             "judge_scores": last_scores,
+            "reward": min(last_scores.values()) if last_scores else (1.0 if status == "converged" else 0.0),
+            "reward_mean": (
+                sum(last_scores.values()) / len(last_scores)
+                if last_scores
+                else (1.0 if status == "converged" else 0.0)
+            ),
         }
         await self._emit(
             {

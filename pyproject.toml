@@ -1,12 +1,21 @@
 [project]
-name = "actuate"
+name = "actuate-ai"
 version = "0.1.0"
-description = "An engineering framework for building closed-loop AI control systems."
+description = "Closed-loop graphs for AI generation, validation, and training rewards."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Actuate Contributors" }]
-
+keywords = ["llm", "agents", "graph", "control-loop", "reward", "evaluation"]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "pydantic>=2.6",
     "networkx>=3.2",
@@ -22,7 +31,7 @@ persistence = ["sqlalchemy>=2.0", "psycopg[binary]>=3.1", "alembic>=1.13"]
 dsl = ["pyyaml>=6.0"]
 capabilities = ["pluggy>=1.5"]
 ui = ["fastapi>=0.111", "uvicorn[standard]>=0.30", "websockets>=12.0", "httpx>=0.27"]
-all = ["actuate[engine,plants,sensors,memory,telemetry,persistence,dsl,capabilities,ui]"]
+all = ["actuate-ai[engine,plants,sensors,memory,telemetry,persistence,dsl,capabilities,ui]"]
 dev = ["pytest>=8.2", "pytest-asyncio>=0.23", "mypy>=1.10", "ruff>=0.5", "httpx>=0.27"]
 
 [project.scripts]
