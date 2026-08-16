@@ -7,7 +7,7 @@ def test_every_agent_has_a_long_system_prompt() -> None:
         if agent["id"] in {"ingress", "egress"}:
             continue
         text = agent["system"]
-        assert len(text) > 280, agent["id"]
+        assert len(text) > 1000, agent["id"]
         assert "MISSION" in text or "AXIS:" in text
 
 
