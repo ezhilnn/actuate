@@ -283,7 +283,7 @@ Host the UI on [Netlify](https://app.netlify.com) (free). Visitors can look arou
 1. `ControlSystem` stays the aggregate root.
 2. Events are append-only; signals are immutable.
 3. New behavior ships as a **capability**, not a special case in the engine.
-4. Production store is **Postgres**.
+4. Production database is **Postgres**.
 
 ## License
 
